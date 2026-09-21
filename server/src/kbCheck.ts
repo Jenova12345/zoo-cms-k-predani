@@ -188,8 +188,19 @@ async function main(): Promise<void> {
       .map((e) => e.name)
       .sort((a, b) => Number(a) - Number(b));
   } catch {
-    console.error(`  CHYBA: datovou složku ${DISPLAYS_DIR} se nepodařilo přečíst.`);
-    process.exit(1);
+    // Data displejů v repozitáři nejsou, leží jen na serveru. Na čistém
+    // klonu to tedy NENÍ chyba: kontroly 1 a 2 (shoda seznamu sekcí
+    // a průchod dohodnutého tvaru) na datech nezávisí a proběhly výš.
+    // Kdo chce i kontrolu nad reálným obsahem, pustí to s DATA_ROOT.
+    console.log("  · složka s daty tu není, přeskakuji (data patří na server, ne do gitu)");
+    console.log("    nad reálnými daty: DATA_ROOT=/cesta/k/datum npm run kb-check");
+    console.log("");
+    if (selhalo) {
+      console.error("NEPROŠLO.");
+      process.exit(1);
+    }
+    console.log("Vše v pořádku.");
+    return;
   }
 
   let zkontrolovano = 0;

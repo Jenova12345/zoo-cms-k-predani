@@ -8,7 +8,17 @@ import { SEKCE, rozdelKb, slozKb } from "../../web/src/lib/kbSekce.js";
 //   npm run kb-ukazka -- 1
 
 const id = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? "1";
-const raw = (await fs.readFile(path.join(DISPLAYS_DIR, id, "kb.md"), "utf8")).replace(/\n+$/, "");
+const cesta = path.join(DISPLAYS_DIR, id, "kb.md");
+let raw: string;
+try {
+  raw = (await fs.readFile(cesta, "utf8")).replace(/\n+$/, "");
+} catch {
+  // Data displejů v repozitáři nejsou, leží na serveru.
+  console.error(`Soubor ${cesta} nenalezen.`);
+  console.error("Data displejů nejsou v gitu. Spusťte to proti nim takhle:");
+  console.error(`  DATA_ROOT=/cesta/k/datum npm run kb-ukazka -- ${id}`);
+  process.exit(1);
+}
 const r = rozdelKb(raw);
 
 console.log(`CO KURÁTOR UVIDÍ V POLÍCH (displej ${id})\n${"=".repeat(62)}`);

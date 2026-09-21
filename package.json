@@ -20,7 +20,8 @@
     "import-obsahu": "npm run import-obsahu --workspace server --",
     "prevod-obsahu": "npm run prevod-obsahu --workspace server --",
     "prevod-kb": "npm run prevod-kb --workspace server --",
-    "kb-check": "npm run kb-check --workspace server"
+    "kb-check": "npm run kb-check --workspace server",
+    "kb-ukazka": "npm run kb-ukazka --workspace server --"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
