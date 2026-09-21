@@ -1,0 +1,61 @@
+ZZ1_Červorovec splývavý (Typhlonectes natans)
+
+ZZ2_Bezrohatka bojovná (Lepidobatrachus laevis)
+
+ZZ3_Rosnička včelí (Trachycephalus resinifictrix)
+
+ZZ4_Pablatnice nosatá (Megophrys nasuta)
+
+ZZ5_Kuňka východní (Bombina orientalis)
+
+ZZ6_Atelopus skvrnitý (atelopus balios)
+
+ZZ7_Hrabatka drsná (African bullfrog)
+
+ZZ8_Pralesnička strašná (phyllobates terribilis)
+
+ZZ9_Pralesnička barvířská – forma Citronella (dendrobates tinctorius citronella)
+
+ZZ10_Pralesnička pruhovaná (phyllobates vittatus)
+
+ZZ11_Pralesnička harlekýn (dendrobates leucomelas)
+
+ZZ12_Atelopus panamský (atelopus zeteki)
+
+ZZ13_Xenopus sp
+
+ZZ14_Ropucha obrovská (rhinella marina)
+
+ZZ15_Rákosnička běloskvrnná (Heterixalus alboguttatus)
+
+ZZ16_Parosnička srdíčková (dyscophus guineti)
+
+ZZ17_Mantela zlatá (mantella aurantiaca)
+
+ZZ18_Mantela zelená (mantella viridis)
+
+ZZ19_Listovnice červenooká (agalychnis callidryas)
+
+ZZ20_Listovnice modrooká (agalychnis annae)
+
+ZZ21_Čolek zelenavý (notophthalmus viridescens)
+
+ZZ22_Tylototriton shanorum
+
+ZZ23_Žebrovník Waltlův (pleurodeles waltl)
+
+ZZ24_ambystoma dumerilii
+
+ZZ25_Axolotl Andersonův (ambystoma adersoni)
+
+ZZ26_siren intermedia
+
+ZZ27_Mlok skvrnitý (salamandra salamandra)
+
+ZZ28_ambystoma mavortium
+
+ZZ29_Čolek kurdistánský (Neurergus crocatus)
+
+ZZ30_Čolek horský apuánský (Ichthyosaura alpestris apuana)
+
+ZZ31_Pachyhynobius shangchengensis

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Amphibiárium · Vzdálený přístup</title>
+    <!-- Fonty se NEtahají z internetu: Rustica leží v /znacka a @font-face
+         je v src/index.css. V pavilonu nemusí být připojení a dřív se tady
+         stahoval Inter z Google Fonts, takže CMS bez internetu vykreslovalo
+         systémovým fontem. Předepsáním obou řezů se ušetří překreslení
+         textu po načtení CSS. `crossorigin` je u preloadu fontu povinný
+         i pro vlastní doménu, jinak se soubor stáhne podruhé. -->
+    <link rel="preload" as="font" type="font/otf" href="/znacka/5_rustica-regular.otf" crossorigin />
+    <link rel="preload" as="font" type="font/otf" href="/znacka/7_rustica-bold.otf" crossorigin />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

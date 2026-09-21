@@ -1,0 +1,141 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Rustica: firemní font pavilonu. Jede v celém CMS i v náhledu tabletu.
+   Servíruje se lokálně z /znacka, NE z Google Fonts — v pavilonu nemusí být
+   internet a aplikace by spadla na systémový font.
+
+   Oba řezy jsou skutečné soubory. Dřív tu byla jen Michalova
+   Rustica-Regular.ttf pro náhled tabletu a tučný řez si prohlížeč
+   dopočítával sám; ta se tímhle nahrazuje, takže i náhled má teď opravdový
+   bold. Soubory jsou otf (od grafika nepřišlo woff2), po LAN to nevadí.
+
+   `swap` místo `block`: text je vidět hned v náhradním fontu a po načtení
+   Rusticy se překreslí. Nikdy nenastane stav, kdy je CMS prázdné, protože
+   se font nestáhl. */
+@font-face {
+  font-family: "Rustica";
+  src: url("/znacka/5_rustica-regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rustica";
+  src: url("/znacka/7_rustica-bold.otf") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Grad: nadpisový font Michalova tabletu. Používá ho JEN náhled tabletu,
+   ať odpovídá tomu, co vidí návštěvník. `block` tu zůstává schválně:
+   v náhledu je věrnost důležitější než rychlost. */
+@font-face {
+  font-family: "Grad";
+  src: url("/michal/Grad-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-fg font-sans antialiased;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent-hi active:scale-[0.99];
+  }
+  .btn-amber {
+    @apply btn bg-amber text-white hover:brightness-105 active:scale-[0.99];
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-fg-muted border border-line hover:text-fg hover:border-accent/40;
+  }
+  /* Nevratná akce (mazání), jen v potvrzovacím dialogu. */
+  .btn-danger {
+    @apply btn bg-danger text-white hover:brightness-105 active:scale-[0.99];
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm text-fg placeholder:text-fg-dim focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent/50 transition;
+  }
+
+  /* Pole v chybě: červený rámeček, který nezmizí ani po kliknutí dovnitř.
+     Bez focus: varianty by ho přebil .input:focus a kurátor by při psaní
+     viděl normální pole. */
+  .input-error {
+    @apply border-danger focus:border-danger focus:ring-danger/25;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+
+  /* Sekční nadtitulek (editorial kicker). */
+  .kicker {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-dim;
+  }
+
+  .dot-online {
+    @apply h-2 w-2 rounded-full bg-accent;
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+  }
+  /* Vypadává: pár tepů chybí, ale tablet nejspíš žije. Oranžová, ne
+     červená — poplach z toho být nemá. */
+  .dot-vypadava {
+    @apply h-2 w-2 rounded-full bg-amber;
+    box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12);
+  }
+  /* Offline: přes 15 minut ticho. Tohle už je porucha, proto červená. */
+  .dot-offline {
+    @apply h-2 w-2 rounded-full bg-danger;
+  }
+  /* Nevíme: server běží krátce, tablet se ještě nestihl ozvat. Prázdné
+     kolečko, ať se nepletlo s poruchou. */
+  .dot-neznamy {
+    @apply h-2 w-2 rounded-full border border-line bg-transparent;
+  }
+
+  .label {
+    @apply block text-xs font-semibold text-fg-muted mb-1.5;
+  }
+}
+
+@layer utilities {
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+}
+
+/* Decentní scrollbary. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d6ddd9 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d6ddd9;
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
