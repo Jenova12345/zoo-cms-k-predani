@@ -426,15 +426,20 @@ export const api = {
   },
 
   // Souhrn dotazů na chatbota (KPI karty a intenzita heat mapy).
-  async analyticsSummary(): Promise<Analytika<AnalyticsSummary>> {
-    return analytika<AnalyticsSummary>("/api/analytics/summary");
+  // `since` je ISO čas začátku období; bez něj si backend drží vlastní
+  // výchozí okno (24 h). Kolik toho opravdu vrátil, říká `since` v odpovědi —
+  // dashboard ukazuje TU hodnotu, ne to, o co jsme požádali.
+  async analyticsSummary(since?: string): Promise<Analytika<AnalyticsSummary>> {
+    const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+    return analytika<AnalyticsSummary>(`/api/analytics/summary${qs}`);
   },
 
   // Jednotlivé dotazy. answered=false = co AI nezvládla.
   async analyticsQuestions(
-    filtr: { limit?: number; answered?: boolean } = {},
+    filtr: { since?: string; limit?: number; answered?: boolean } = {},
   ): Promise<Analytika<AnalyticsQuestions>> {
     const params = new URLSearchParams();
+    if (filtr.since) params.set("since", filtr.since);
     if (filtr.limit !== undefined) params.set("limit", String(filtr.limit));
     if (filtr.answered !== undefined) params.set("answered", String(filtr.answered));
     const qs = params.toString();

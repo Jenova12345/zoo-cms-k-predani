@@ -110,6 +110,35 @@ function cislo(x: unknown): number | undefined {
   return typeof x === "number" && Number.isFinite(x) ? x : undefined;
 }
 
+// Číslo displeje z hodnoty, kterou tablet napsal do pole `displej`. Kromě
+// čísla bereme i řetězec: starší Unity tam psalo jméno kiosku (`"Kiosek_5"`,
+// někdy jen `"5"`). Bere se POSLEDNÍ skupina číslic, protože právě tak je
+// jméno složené — prefix a číslo displeje na konci.
+function cisloDispleje(x: unknown): number | undefined {
+  const primo = cislo(x);
+  if (primo !== undefined) return primo;
+  if (typeof x !== "string") return undefined;
+  const nalez = /(\d+)\s*$/.exec(x.trim());
+  if (!nalez) return undefined;
+  const n = Number(nalez[1]);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// Neuvozovkovaná hodnota u `displej`, tedy `{"displej":Kiosek_5,…}`. To není
+// platný JSON a `JSON.parse` na tom skončí, takže se zahodil CELÝ řádek —
+// i když všechno ostatní v něm bylo v pořádku. Číslo displeje přitom stejně
+// bereme z názvu složky, takže je to jediné pole, o které vůbec nestojíme.
+//
+// Opravuje se schválně JEN tohle jedno pole a JEN když parsování selhalo:
+// není to obecné „spravování" cizího JSONu, jen záplata na známý tvar. Když
+// se ani po ní nepodaří řádek přečíst, zahodí se jako dřív.
+const NEUVOZOVKOVANY_DISPLEJ = /("displej"\s*:\s*)([A-Za-z_][\w-]*)(\s*[,}])/;
+
+function opravNeuvozovkovanyDisplej(radek: string): string | null {
+  if (!NEUVOZOVKOVANY_DISPLEJ.test(radek)) return null;
+  return radek.replace(NEUVOZOVKOVANY_DISPLEJ, (_, pred, hodnota, za) => `${pred}"${hodnota}"${za}`);
+}
+
 function zkrat(radek: string): string {
   const r = radek.trim();
   return r.length > 200 ? `${r.slice(0, 200)}…` : r;
@@ -120,7 +149,14 @@ export function parsujRadek(radek: string, displejZeSlozky?: number): Udalost | 
   try {
     syrovy = JSON.parse(radek) as Record<string, unknown>;
   } catch {
-    return null;
+    // Druhý pokus, viz opravNeuvozovkovanyDisplej().
+    const opraveny = opravNeuvozovkovanyDisplej(radek);
+    if (opraveny === null) return null;
+    try {
+      syrovy = JSON.parse(opraveny) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
   }
   if (!syrovy || typeof syrovy !== "object") return null;
 
@@ -128,7 +164,7 @@ export function parsujRadek(radek: string, displejZeSlozky?: number): Udalost | 
   const casMs = Date.parse(cas);
   // Název složky vyhrává nad polem v řádku. V ploché struktuře žádná
   // složka není, tam zbývá jen pole.
-  const displej = displejZeSlozky ?? cislo(syrovy.displej);
+  const displej = displejZeSlozky ?? cisloDispleje(syrovy.displej);
   const akce = typeof syrovy.akce === "string" ? syrovy.akce : "";
   // Bez času, displeje nebo akce nejde událost k ničemu použít.
   if (!Number.isFinite(casMs) || displej === undefined || !akce) return null;
@@ -271,14 +307,25 @@ export async function souboryVRozsahu(od: string, doDne: string): Promise<Soubor
 
 // --- Souhrn pro dashboard ---------------------------------------------
 
+// Období dashboardu. Každé číslo, které se dá počítat za období, se vrací
+// pro všechna tři naráz — jeden dotaz pak obslouží i přepínání období
+// v prohlížeči, bez dalšího kola na server.
+//
+// POZOR na význam: `den` je od dnešní půlnoci (kalendářní den), `tyden`
+// a `mesic` jsou posledních 7 a 30 × 24 h (klouzavé). Tak se to počítalo
+// odjakživa a dashboard to takhle i popisuje.
+export type Obdobi = "den" | "tyden" | "mesic";
+
+export interface PodleObdobi<T> {
+  den: T;
+  tyden: T;
+  mesic: T;
+}
+
 export interface StavDispleje {
   displej: number;
-  navstevyDnes: number;
-  navstevyTyden: number;
-  navstevyMesic: number;
-  prumernaDobaS: number | null;
-  chatu: number;
-  chyb: number;
+  navstevy: PodleObdobi<number>;
+  prumernaDobaS: PodleObdobi<number | null>; // průměrná délka relace u displeje
   posledniUdalost: string | null;
   tichy: boolean; // 24 hodin bez jediné události, nejspíš spadlý tablet
 }
@@ -286,18 +333,17 @@ export interface StavDispleje {
 export interface StavTypuSlidu {
   typ: string; // typ CMS, nebo surový název z tabletu, když ho neznáme
   znamy: boolean;
-  otevreni: number;
-  prumernaDobaS: number | null;
+  otevreni: PodleObdobi<number>;
+  prumernaDobaS: PodleObdobi<number | null>; // průměrná doba na slidu
 }
 
 export interface Prehled {
   od: string;
   do: string;
   maData: boolean;
-  celkem: { relaci: number; udalosti: number; chatu: number; chyb: number };
+  celkem: PodleObdobi<{ relaci: number; udalosti: number }>;
   displeje: StavDispleje[];
   typySlidu: StavTypuSlidu[];
-  chyby: { cas: string; displej: number; zprava: string }[];
   ticheDispleje: number[];
   kvalita: {
     poskozeneRadky: number;
@@ -306,11 +352,18 @@ export interface Prehled {
   };
 }
 
+const OBDOBI: Obdobi[] = ["den", "tyden", "mesic"];
+
+// Nová trojice čísel. Pozor na sdílené reference: pole se musí vyrábět
+// pokaždé nové, jinak by si všechna tři období psala do jednoho.
+function zaObdobi<T>(tovarna: () => T): PodleObdobi<T> {
+  return { den: tovarna(), tyden: tovarna(), mesic: tovarna() };
+}
+
 // Trvání delší než celá relace je zbytek stopek z minulé relace. Tolerance
 // je kvůli krátkým relacím, kde se poslední slide počítá ještě po poslední
 // zaznamenané události.
 const TOLERANCE_S = 60;
-const MAX_CHYB = 20;
 
 export function den(datum: Date): string {
   const y = datum.getFullYear();
@@ -375,56 +428,67 @@ export async function prehled(opts: {
   const pred30 = ted - 30 * 86400000;
   const pred24h = ted - 86400000;
 
-  const podleDispleje = new Map<number, StavDispleje & { dobyS: number[] }>();
+  // Do kterých období událost nebo relace spadá. Jeden výpočet, ať se
+  // hranice neopisují na pěti místech.
+  const doObdobi = (casMs: number): Obdobi[] => {
+    const kam: Obdobi[] = ["mesic"];
+    if (casMs >= pred7) kam.push("tyden");
+    if (casMs >= zacatekDnes) kam.push("den");
+    return kam;
+  };
+
+  interface StavSDobami extends StavDispleje {
+    dobyS: PodleObdobi<number[]>;
+  }
+
+  const podleDispleje = new Map<number, StavSDobami>();
   const dej = (n: number) => {
     let s = podleDispleje.get(n);
     if (!s) {
       s = {
         displej: n,
-        navstevyDnes: 0,
-        navstevyTyden: 0,
-        navstevyMesic: 0,
-        prumernaDobaS: null,
-        chatu: 0,
-        chyb: 0,
+        navstevy: zaObdobi(() => 0),
+        prumernaDobaS: zaObdobi<number | null>(() => null),
         posledniUdalost: null,
         tichy: true,
-        dobyS: [],
+        dobyS: zaObdobi<number[]>(() => []),
       };
       podleDispleje.set(n, s);
     }
     return s;
   };
 
-  // Návštěva = jedna relace. Počítá se podle jejího začátku.
+  const celkem = zaObdobi(() => ({ relaci: 0, udalosti: 0 }));
+
+  // Návštěva = jedna relace. Počítá se podle jejího začátku; délka relace
+  // jde do průměru u toho displeje, ke kterému relace patří.
   for (const r of relace.values()) {
     const s = dej(r.displej);
-    if (r.od >= zacatekDnes) s.navstevyDnes++;
-    if (r.od >= pred7) s.navstevyTyden++;
-    if (r.od >= pred30) s.navstevyMesic++;
     const doba = Math.round((r.do - r.od) / 1000);
-    if (doba > 0) s.dobyS.push(doba);
+    for (const o of doObdobi(r.od)) {
+      s.navstevy[o]++;
+      celkem[o].relaci++;
+      if (doba > 0) s.dobyS[o].push(doba);
+    }
   }
 
-  const typy = new Map<string, { znamy: boolean; otevreni: number; doby: number[] }>();
-  const chyby: Prehled["chyby"] = [];
+  interface StavTypu {
+    znamy: boolean;
+    otevreni: PodleObdobi<number>;
+    doby: PodleObdobi<number[]>;
+  }
+
+  const typy = new Map<string, StavTypu>();
   const neznameTypy = new Set<string>();
   let zahozenaTrvani = 0;
-  let chatu = 0;
 
   for (const u of udalosti) {
     const s = dej(u.displej);
     if (!s.posledniUdalost || u.cas > s.posledniUdalost) s.posledniUdalost = u.cas;
     if (u.casMs >= pred24h) s.tichy = false;
 
-    if (u.akce === "otevren_chat") {
-      s.chatu++;
-      chatu++;
-    }
-    if (u.akce === "chyba") {
-      s.chyb++;
-      chyby.push({ cas: u.cas, displej: u.displej, zprava: u.zprava ?? "Tablet nahlásil chybu." });
-    }
+    const obdobiUdalosti = doObdobi(u.casMs);
+    for (const o of obdobiUdalosti) celkem[o].udalosti++;
 
     if (u.akce !== "zobrazen_slide") continue;
 
@@ -432,10 +496,10 @@ export async function prehled(opts: {
     if (!u.typCms && u.typSurovy) neznameTypy.add(u.typSurovy.trim());
     let t = typy.get(klic);
     if (!t) {
-      t = { znamy: !!u.typCms, otevreni: 0, doby: [] };
+      t = { znamy: !!u.typCms, otevreni: zaObdobi(() => 0), doby: zaObdobi<number[]>(() => []) };
       typy.set(klic, t);
     }
-    t.otevreni++;
+    for (const o of obdobiUdalosti) t.otevreni[o]++;
 
     if (u.trvaniS === undefined) continue;
     const r = relace.get(`${u.displej}:${u.relace || u.cas}`);
@@ -445,11 +509,17 @@ export async function prehled(opts: {
       zahozenaTrvani++;
       continue;
     }
-    t.doby.push(u.trvaniS);
+    for (const o of obdobiUdalosti) t.doby[o].push(u.trvaniS);
   }
 
   const prumer = (pole: number[]): number | null =>
     pole.length ? Math.round(pole.reduce((a, b) => a + b, 0) / pole.length) : null;
+
+  const prumeryZaObdobi = (doby: PodleObdobi<number[]>): PodleObdobi<number | null> => {
+    const out = zaObdobi<number | null>(() => null);
+    for (const o of OBDOBI) out[o] = prumer(doby[o]);
+    return out;
+  };
 
   // Displeje, které v datech nejsou vůbec, jsou taky "tiché": tablet se
   // neozval ani jednou.
@@ -458,32 +528,29 @@ export async function prehled(opts: {
     dej(n);
   }
 
+  // Řadí se podle měsíce: pořadí tak zůstane stabilní, i když si kurátor
+  // v prohlížeči přepne období na den. Řazení podle zvoleného období si
+  // dashboard udělá sám, má na to všechna tři čísla.
   const displeje: StavDispleje[] = [...podleDispleje.values()]
-    .map(({ dobyS, ...zbytek }) => ({ ...zbytek, prumernaDobaS: prumer(dobyS) }))
-    .sort((a, b) => b.navstevyMesic - a.navstevyMesic || a.displej - b.displej);
+    .map(({ dobyS, ...zbytek }) => ({ ...zbytek, prumernaDobaS: prumeryZaObdobi(dobyS) }))
+    .sort((a, b) => b.navstevy.mesic - a.navstevy.mesic || a.displej - b.displej);
 
   const typySlidu: StavTypuSlidu[] = [...typy.entries()]
     .map(([typ, t]) => ({
       typ,
       znamy: t.znamy,
       otevreni: t.otevreni,
-      prumernaDobaS: prumer(t.doby),
+      prumernaDobaS: prumeryZaObdobi(t.doby),
     }))
-    .sort((a, b) => b.otevreni - a.otevreni);
+    .sort((a, b) => b.otevreni.mesic - a.otevreni.mesic);
 
   return {
     od,
     do: doDne,
     maData: udalosti.length > 0,
-    celkem: {
-      relaci: relace.size,
-      udalosti: udalosti.length,
-      chatu,
-      chyb: chyby.length,
-    },
+    celkem,
     displeje,
     typySlidu,
-    chyby: chyby.sort((a, b) => b.cas.localeCompare(a.cas)).slice(0, MAX_CHYB),
     ticheDispleje: displeje.filter((d) => d.tichy).map((d) => d.displej),
     kvalita: {
       poskozeneRadky,

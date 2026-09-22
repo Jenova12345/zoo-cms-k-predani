@@ -182,7 +182,6 @@ export interface SouhrnObdobi {
   zobrazeni: number;
   prumernaDobaS: number | null; // doba u displeje = rozpětí jedné relace
   aiZobrazeni: number; // otevření AI slidu
-  aiDotazy: number; // otevren_chat = někdo se doopravdy zeptal
 }
 
 export interface RadekZebricku {
@@ -233,14 +232,21 @@ export const TYP_SLIDU_LABEL: Record<string, string> = {
 // --- Události z tabletů (Michalovo Unity) ---
 // Tvar odpovídá server/src/udalosti.ts.
 
+// Období přehledu. Server posílá každé číslo pro všechna tři naráz, takže
+// přepnutí období v dashboardu nestojí další dotaz.
+// `den` = od dnešní půlnoci, `tyden` a `mesic` = posledních 7 a 30 dní.
+export type Obdobi = "den" | "tyden" | "mesic";
+
+export interface PodleObdobi<T> {
+  den: T;
+  tyden: T;
+  mesic: T;
+}
+
 export interface StavDispleje {
   displej: number;
-  navstevyDnes: number;
-  navstevyTyden: number;
-  navstevyMesic: number;
-  prumernaDobaS: number | null;
-  chatu: number;
-  chyb: number;
+  navstevy: PodleObdobi<number>;
+  prumernaDobaS: PodleObdobi<number | null>;
   posledniUdalost: string | null;
   tichy: boolean;
 }
@@ -248,18 +254,17 @@ export interface StavDispleje {
 export interface StavTypuSlidu {
   typ: string;
   znamy: boolean;
-  otevreni: number;
-  prumernaDobaS: number | null;
+  otevreni: PodleObdobi<number>;
+  prumernaDobaS: PodleObdobi<number | null>;
 }
 
 export interface PrehledUdalosti {
   od: string;
   do: string;
   maData: boolean;
-  celkem: { relaci: number; udalosti: number; chatu: number; chyb: number };
+  celkem: PodleObdobi<{ relaci: number; udalosti: number }>;
   displeje: StavDispleje[];
   typySlidu: StavTypuSlidu[];
-  chyby: { cas: string; displej: number; zprava: string }[];
   ticheDispleje: number[];
   kvalita: { poskozeneRadky: number; zahozenaTrvani: number; neznameTypy: string[] };
 }

@@ -969,23 +969,58 @@ názvem (`7-zaloha`) se ignorují.
  "typ":"Info","cislo":1,"trvani_s":26}
 ```
 
-| Akce | Význam |
-|---|---|
-| `relace_start` | někdo přišel k displeji a začal ho používat |
-| `zobrazen_slide` | zobrazil se slide; `typ`, `cislo` a `trvani_s` |
-| `otevren_chat` | někdo se opravdu zeptal AI |
+Akce, které se v produkčních lozích doopravdy objevují (ověřeno 22. 9. 2026
+nad celým `C:\ZZ_CMS_Data\udalosti\unity`):
+
+| Akce | Význam | Počítá se |
+|---|---|---|
+| `relace_start` | někdo přišel k displeji a začal ho používat | ano, jako návštěva |
+| `zobrazen_slide` | zobrazil se slide; `typ`, `cislo` a `trvani_s` | ano, do typů slidů a průměrné doby |
+| `relace_konec` | návštěvník od displeje odešel | ne, konec se odvozuje z časů |
+| `start_aplikace` | tablet se nastartoval | ne, jen stopa v logu |
+| `ukonceni_aplikace` | aplikace na tabletu skončila | ne |
+| `obsah_nacten` | tablet si stáhl obsah z CMS | ne |
+
+**`otevren_chat` produkční Unity nezapisuje.** V původní dohodě s Michalem
+bylo, ale v datech není ani jednou; objevuje se jen ve starších vývojových
+lozích. Proto **ani dashboard, ani stránka Analytika neukazují dlaždici
+s počtem dotazů na AI** (dřív se jmenovaly „Otevření chatbota" a „Skutečné
+dotazy" a ukazovaly natvrdo nulu). Kolik dotazů doopravdy padlo, ví Danielův
+backend (viz oddíl 12), ne Unity. Denní souhrny akci pro jistotu dál počítají
+(`DenniSouhrn.otevreniChatu`), jen se nikam nevydává — kdyby ji Michal začal
+posílat, budou čísla i zpětně a stačí dlaždici vrátit.
+Stejně tak Unity nikdy neposílá akci `chyba`, takže ani „Chyby z tabletů"
+v dashboardu nejsou. Kdyby to Michal někdy začal posílat, čtení je na to
+připravené (neznámá akce se jen ignoruje, nic se nerozbije) a dlaždice se dá
+vrátit.
 
 **Čtení je schválně tolerantní.** Je to cizí formát, který se ještě může
 měnit, a data z provozu bývají špinavá:
 
 - poškozený řádek se **přeskočí a spočítá**,
+- **nečíselné pole `displej` řádek neshodí.** Starší tablety tam psaly jméno
+  kiosku, a to ve dvou podobách: `"displej":"Kiosek_5"` (platný JSON, jen
+  řetězec místo čísla) a `"displej":Kiosek_5` **bez uvozovek**, což platný
+  JSON není a shodilo to `JSON.parse` na CELÉM řádku, i když všechno ostatní
+  v něm bylo v pořádku. Obojí se dnes přečte: z řetězce se vezme poslední
+  skupina číslic a neuvozovkovaná hodnota se před parsováním ouvozovkuje.
+  Opravuje se **jen tohle jedno pole a jen když parsování selhalo** — není to
+  obecné spravování cizího JSONu. Číslo displeje stejně vyhrává z názvu
+  složky, takže se tím nic nepřepisuje,
 - neznámý typ slidu se **nezahazuje**, projde dál tak, jak přišel
   (`typSurovy`), a stránka ho ukáže,
 - nesmyslné trvání (delší než celá relace = zbytek stopek z minulé) se
   **nezapočítá do průměrů**.
 
-Co všechno se přeskočilo, hlásí CMS **oranžovým pruhem nad čísly**, ať se na
-tichou chybu nepřijde až za půl roku. Unity čísluje slidy od nuly, CMS je
+Co všechno se přeskočilo, je **v dashboardu i v Analytice schované pod
+rozbalovátkem „Kvalita dat (pro správce)"**: kurátorovi věta o poškozených
+řádcích nic neříká a nahoře na stránce dělala paniku. Když se zahodí víc než
+1 % vstupu, svítí u nadpisu **oranžová tečka**, aby se na tichou chybu přišlo
+i bez rozbalení.
+
+Oranžový pruh nahoře v Analytice zůstal jen na jedinou věc: **kolik displejů
+vůbec posílá data**. To není technikálie, ale to hlavní, co se o číslech pod
+ním musí vědět — jsou jen z části pavilonu. Unity čísluje slidy od nuly, CMS je
 přečísluje na řadu od jedné, aby seděly s tím, co vidí kurátor.
 
 ### Proč denní souhrny
@@ -1007,6 +1042,12 @@ počítá právě jednou. Dotaz na libovolný rozsah je pak jen sečtení souhrn
 Souhrny se ukládají do **`<DATA_ROOT>/analytika/RRRR-MM.json`** (jeden soubor
 na měsíc, 2,5 MB za celý rok), aby restart serveru neznamenal šestisekundové
 čekání na první otevření stránky.
+
+> **Když se změní parser, musí se zvýšit `VERZE_CACHE`** v `analytika.ts`.
+> Uložené souhrny se počítaly tím starým; bez zvýšení čísla by se dál sčítaly
+> staré výsledky a oprava by se v číslech nikdy neprojevila. Po zvýšení se
+> souhrny jednou přepočítají z logů (~6 s na rok) a pak jede všechno jako dřív.
+> Ručně se v `analytika/` nic mazat nemusí.
 
 > **`analytika/` je JEN zrychlení, ne zdroj pravdy.** Složku lze kdykoli
 > smazat; dopočítá se z logů v `udalosti/`. Poškozený měsíční soubor si server
@@ -1032,6 +1073,32 @@ nedá započítat dvakrát.
   a červená procenta u čísel.
 - Do žebříčku se berou názvy druhů z `meta.json`. Displej bez druhu se ukáže
   jako „Displej 19", ne jako deset řádků „Nepřiřazeno".
+
+### Období v dashboardu
+
+`/api/udalosti/prehled` čte **jednou** posledních 30 dnů a vrací čísla rovnou
+**pro všechna tři období najednou**:
+
+```json
+{ "celkem": { "den": {…}, "tyden": {…}, "mesic": {…} },
+  "displeje": [ { "displej": 3,
+                  "navstevy":      { "den": 12, "tyden": 84, "mesic": 331 },
+                  "prumernaDobaS": { "den": 38, "tyden": 41, "mesic": 40 } } ] }
+```
+
+Přepnutí období v dashboardu proto **negeneruje žádný další požadavek** na
+server, jen se sáhne do jiné větve už stažené odpovědi. „Den" je od dnešní
+půlnoci, „týden" posledních 7 dnů, „měsíc" posledních 30 dnů.
+
+Dashboard má **globální přepínač nahoře** (výchozí „den") a u každé sekce
+(návštěvy podle displejů, typy slidů, heat mapa, dotazy na AI, poslední
+dotazy) ještě **vlastní**. Lokální přebije globální; kliknutí na globální
+lokální volby zruší, aby se šlo jedním klikem vrátit do srovnaného stavu.
+Sekce s vlastním obdobím to přiznává štítkem `VLASTNÍ OBDOBÍ ✕`.
+
+Čísla chatbota (oddíl 12) na jiném období závisí — tam se `since` posílá na
+Danielův backend a **nová data se stáhnou**. Odpovědi se drží v paměti
+stránky podle období, takže přepnutí tam a zpět už síť nezatíží.
 
 ---
 
@@ -1077,6 +1144,8 @@ Prohlížeč cizí službu nevolá. Náš server má vlastní endpointy
 **chráněné přihlášením** jako ostatní `/api`, a navíc:
 
 - ověří vstupní parametry (nesmyslné `since`, `limit`, `answered` → `400`),
+- předá `since` podle období vybraného v dashboardu (bez něj by chatbot počítal
+  posledních 24 h a čísla by neseděla se zbytkem přehledu),
 - srazí `limit` na strop 2000 z kontraktu,
 - ohlídají timeout (`ANALYTICS_TIMEOUT_MS`),
 - očistí odpověď, aby chybějící pole na straně chatbota neshodilo dashboard.
@@ -1097,6 +1166,11 @@ displeje z CMS bez intenzity, KPI karty se nezobrazí (radši nic než vymyšlen
 
 Prázdná odpověď (chatbot běží, ale za období nejsou dotazy) se hlásí jako
 „Zatím žádné dotazy.", ne jako nula bez kontextu.
+
+**Období hlásíme tak, jak ho vrátil backend, ne jak jsme o něj požádali.**
+Chatbot nemusí držet historii tak hluboko; pod KPI kartami proto stojí datum
+z pole `since` v odpovědi a při nesouladu větším než hodina se rovnou napíše,
+že tak hluboko data nejsou.
 
 ### Heat mapa nad půdorysem pavilonu
 

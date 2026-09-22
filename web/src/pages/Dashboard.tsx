@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { Info, Loader2, MonitorCheck, MonitorX, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Info,
+  Loader2,
+  MonitorCheck,
+  MonitorX,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { api, formatDate, formatDateTime } from "../lib/api";
 import { canonicalizeLatin } from "../lib/latin";
 import {
@@ -16,7 +25,9 @@ import type {
   AnalyticsSpecies,
   AnalyticsSummary,
   DisplaySummary,
+  Obdobi,
   PrehledUdalosti,
+  StavDispleje,
 } from "../lib/types";
 
 // Data dashboardu jsou reálná: displeje z našeho /api/displays (meta.json na
@@ -55,9 +66,131 @@ function popisTabletu(d: DisplaySummary): string {
 }
 
 const LIMIT_POSLEDNI = 200; // kolik dotazů stáhnout
-const VYPSAT_POSLEDNI = 15; // kolik jich vypsat
 const LIMIT_NEZVLADNUTE = 50;
-const VYPSAT_NEZVLADNUTE = 12;
+const NA_STRANU = 8; // kolik dotazů na jednu stranu seznamu
+
+// --- Období ---------------------------------------------------------------
+//
+// Dashboard má jeden globální přepínač a u vybraných sekcí ještě vlastní,
+// který ten globální přebije. Sáhnutí na globální přepínač všechna vlastní
+// nastavení ZRUŠÍ — jinak by „nastavit celý přehled naráz" neplatilo a
+// kurátor by hledal, proč se jedna sekce nezměnila.
+//
+// Data z tabletů nesou všechna tři období naráz (viz server/src/udalosti.ts),
+// takže přepnutí u návštěv i heat mapy je okamžité, bez dotazu na server.
+// Analytika chatbota se dotazuje s `since`, proto se odpovědi drží v cache
+// podle období.
+
+type SekceObdobi = "navstevy" | "heatmapa" | "aiKpi" | "dotazy";
+
+const OBDOBI_PORADI: Obdobi[] = ["den", "tyden", "mesic"];
+
+const OBDOBI_POPIS: Record<Obdobi, string> = {
+  den: "Den",
+  tyden: "Týden",
+  mesic: "Měsíc",
+};
+
+// Do věty pod čísly. Významy nejsou souměrné a je to záměr: tak to počítá
+// server odjakživa, tak to tu i říkáme nahlas.
+const OBDOBI_VETA: Record<Obdobi, string> = {
+  den: "od dnešní půlnoci",
+  tyden: "posledních 7 dní",
+  mesic: "posledních 30 dní",
+};
+
+// Začátek období jako ISO čas pro `since` v analytice chatbota.
+function zacatekObdobi(o: Obdobi): string {
+  const ted = Date.now();
+  if (o === "den") {
+    const d = new Date(ted);
+    d.setHours(0, 0, 0, 0);
+    return d.toISOString();
+  }
+  return new Date(ted - (o === "tyden" ? 7 : 30) * 86400000).toISOString();
+}
+
+function PrepinacObdobi({
+  hodnota,
+  onZmena,
+  maly = false,
+  vlastni = false,
+  onReset,
+}: {
+  hodnota: Obdobi;
+  onZmena: (o: Obdobi) => void;
+  maly?: boolean;
+  vlastni?: boolean; // sekce má vlastní období, liší se od globálního
+  onReset?: () => void;
+}) {
+  const velikost = maly ? "px-2 py-0.5 text-[11px]" : "px-3 py-1.5 text-sm";
+  return (
+    <div className="flex items-center gap-1.5">
+      {vlastni && (
+        <button
+          onClick={onReset}
+          className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber hover:bg-amber-soft"
+          title="Zpět na období podle globálního přepínače"
+        >
+          vlastní období
+          <X className="h-3 w-3" strokeWidth={2.5} />
+        </button>
+      )}
+      <div className={`flex gap-1 ${maly ? "" : "rounded-lg bg-canvas p-1 ring-1 ring-line"}`}>
+        {OBDOBI_PORADI.map((o) => (
+          <button
+            key={o}
+            onClick={() => onZmena(o)}
+            className={`rounded-md font-medium ${velikost} ${
+              hodnota === o
+                ? "bg-accent text-white"
+                : "text-fg-muted hover:bg-surface hover:text-fg"
+            }`}
+          >
+            {OBDOBI_POPIS[o]}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Stránkování dlouhých seznamů. Posuvník uvnitř dlouhé stránky se snadno
+// přehlédne, tohle drží výšku sekce pevnou a je vidět, kolik toho ještě je.
+function Strankovani({
+  strana,
+  stran,
+  onZmena,
+}: {
+  strana: number;
+  stran: number;
+  onZmena: (s: number) => void;
+}) {
+  if (stran <= 1) return null;
+  return (
+    <div className="flex items-center justify-end gap-2 pt-3">
+      <button
+        onClick={() => onZmena(strana - 1)}
+        disabled={strana === 0}
+        className="btn-ghost px-2 py-1 disabled:opacity-40"
+        aria-label="Předchozí strana"
+      >
+        <ChevronLeft className="h-4 w-4" strokeWidth={2} />
+      </button>
+      <span className="text-[11px] text-fg-dim tnum">
+        {strana + 1} / {stran}
+      </span>
+      <button
+        onClick={() => onZmena(strana + 1)}
+        disabled={strana >= stran - 1}
+        className="btn-ghost px-2 py-1 disabled:opacity-40"
+        aria-label="Další strana"
+      >
+        <ChevronRight className="h-4 w-4" strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
 
 const NEPRIPOJENO = "Analytika chatbota zatím není připojená.";
 const BEZ_DOTAZU = "Zatím žádné dotazy.";
@@ -103,10 +236,10 @@ function druhLabel(q: { species_name: string; species_latin: string }): string {
 }
 
 // Nejnovější dotazy první; kontrakt pořadí negarantuje, tak si ho srovnáme sami.
-function nejnovejsi(questions: AnalyticsQuestion[], kolik: number): AnalyticsQuestion[] {
-  return [...questions]
-    .sort((a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0))
-    .slice(0, kolik);
+function serazeneDotazy(questions: AnalyticsQuestion[]): AnalyticsQuestion[] {
+  return [...questions].sort(
+    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
+  );
 }
 
 // Doba u displeje: vteřiny se čtou blbě, minuty jsou pro kurátora užitečnější.
@@ -330,19 +463,50 @@ function naparuj(
   };
 }
 
+type CacheObdobi<T> = Partial<Record<Obdobi, Analytika<T>>>;
+
 export default function Dashboard() {
   const [displays, setDisplays] = useState<DisplaySummary[] | null>(null);
   const [chybaDispleju, setChybaDispleju] = useState<string | null>(null);
-  const [summary, setSummary] = useState<Analytika<AnalyticsSummary> | null>(null);
-  const [posledni, setPosledni] = useState<Analytika<AnalyticsQuestions> | null>(null);
-  const [nezvladnute, setNezvladnute] = useState<Analytika<AnalyticsQuestions> | null>(null);
   const [udalosti, setUdalosti] = useState<Analytika<PrehledUdalosti> | null>(null);
   const [nacitani, setNacitani] = useState(true);
   const [hover, setHover] = useState<HeatNode | null>(null);
 
-  // Každý zdroj se vykreslí, jak dorazí, na nedostupný chatbot se čeká do
-  // timeoutu a stránka by kvůli němu neměla stát u kolečka. Analytika
-  // nevyhazuje výjimku (vrací obálku), seznam displejů ano.
+  // --- Období: globální + vlastní u jednotlivých sekcí ---
+  const [globalniObdobi, setGlobalniObdobi] = useState<Obdobi>("den");
+  const [vlastniObdobi, setVlastniObdobi] = useState<Partial<Record<SekceObdobi, Obdobi>>>({});
+  const obdobiSekce = (s: SekceObdobi): Obdobi => vlastniObdobi[s] ?? globalniObdobi;
+
+  // Globální přepínač nastavuje celý přehled, takže vlastní nastavení sekcí ruší.
+  function nastavGlobalni(o: Obdobi) {
+    setGlobalniObdobi(o);
+    setVlastniObdobi({});
+  }
+
+  // Volba shodná s globální není „vlastní období", jen se vrací pod globál.
+  function nastavSekci(s: SekceObdobi, o: Obdobi) {
+    setVlastniObdobi((p) => {
+      const dalsi = { ...p };
+      if (o === globalniObdobi) delete dalsi[s];
+      else dalsi[s] = o;
+      return dalsi;
+    });
+  }
+
+  // --- Analytika chatbota: odpověď na období se drží, přepnutí zpět je hned ---
+  const [summaryCache, setSummaryCache] = useState<CacheObdobi<AnalyticsSummary>>({});
+  const [posledniCache, setPosledniCache] = useState<CacheObdobi<AnalyticsQuestions>>({});
+  const [nezvladnuteCache, setNezvladnuteCache] = useState<CacheObdobi<AnalyticsQuestions>>({});
+  // Co se právě stahuje, ať se tentýž dotaz nepošle dvakrát.
+  const bezi = useRef(new Set<string>());
+
+  const obdobiKpi = obdobiSekce("aiKpi");
+  const obdobiDotazy = obdobiSekce("dotazy");
+  const obdobiHeat = obdobiSekce("heatmapa");
+  const obdobiNavstevy = obdobiSekce("navstevy");
+
+  // Displeje a události z tabletů. Události stačí stáhnout jednou pro celé
+  // okno: nesou všechna tři období naráz.
   async function load() {
     setNacitani(true);
     await Promise.all([
@@ -358,9 +522,6 @@ export default function Dashboard() {
         },
       ),
       api.udalosti({ dny: 30 }).then(setUdalosti),
-      api.analyticsSummary().then(setSummary),
-      api.analyticsQuestions({ limit: LIMIT_POSLEDNI }).then(setPosledni),
-      api.analyticsQuestions({ answered: false, limit: LIMIT_NEZVLADNUTE }).then(setNezvladnute),
     ]);
     setNacitani(false);
   }
@@ -368,6 +529,56 @@ export default function Dashboard() {
   useEffect(() => {
     void load();
   }, []);
+
+  // Dotáhne z analytiky chatbota jen to období, které je zrovna potřeba
+  // a ještě není v cache.
+  useEffect(() => {
+    const zajisti = <T,>(
+      klic: string,
+      mam: boolean,
+      nacti: () => Promise<Analytika<T>>,
+      uloz: (d: Analytika<T>) => void,
+    ) => {
+      if (mam || bezi.current.has(klic)) return;
+      bezi.current.add(klic);
+      void nacti()
+        .then(uloz)
+        .finally(() => bezi.current.delete(klic));
+    };
+
+    // Souhrn potřebují KPI karty i heat mapa (ta jím barví, když nejsou
+    // návštěvy z tabletů).
+    for (const o of new Set([obdobiKpi, obdobiHeat])) {
+      zajisti<AnalyticsSummary>(
+        `summary:${o}`,
+        summaryCache[o] !== undefined,
+        () => api.analyticsSummary(zacatekObdobi(o)),
+        (d) => setSummaryCache((p) => ({ ...p, [o]: d })),
+      );
+    }
+    zajisti<AnalyticsQuestions>(
+      `posledni:${obdobiDotazy}`,
+      posledniCache[obdobiDotazy] !== undefined,
+      () => api.analyticsQuestions({ since: zacatekObdobi(obdobiDotazy), limit: LIMIT_POSLEDNI }),
+      (d) => setPosledniCache((p) => ({ ...p, [obdobiDotazy]: d })),
+    );
+    zajisti<AnalyticsQuestions>(
+      `nezvladnute:${obdobiDotazy}`,
+      nezvladnuteCache[obdobiDotazy] !== undefined,
+      () =>
+        api.analyticsQuestions({
+          since: zacatekObdobi(obdobiDotazy),
+          answered: false,
+          limit: LIMIT_NEZVLADNUTE,
+        }),
+      (d) => setNezvladnuteCache((p) => ({ ...p, [obdobiDotazy]: d })),
+    );
+  }, [obdobiKpi, obdobiHeat, obdobiDotazy, summaryCache, posledniCache, nezvladnuteCache]);
+
+  const summary = summaryCache[obdobiKpi] ?? null;
+  const summaryHeat = summaryCache[obdobiHeat] ?? null;
+  const posledni = posledniCache[obdobiDotazy] ?? null;
+  const nezvladnute = nezvladnuteCache[obdobiDotazy] ?? null;
 
   // Stav tabletů je živá věc: tep chodí každou minutu, takže se stejně často
   // přenačte i seznam displejů. Zbytek dashboardu (analytika chatbota, události)
@@ -382,7 +593,6 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, []);
 
-  const summaryData = summary?.dostupne ? summary.data : null;
   const udalostiData = udalosti?.dostupne ? udalosti.data : null;
   const maUdalosti = !!udalostiData?.maData;
 
@@ -395,26 +605,122 @@ export default function Dashboard() {
     return soucet;
   }, [displays]);
 
-  // Návštěvy z tabletů barví heat mapu, když nějaké jsou.
+  // Návštěvy z tabletů barví heat mapu, když nějaké jsou. Bere se období
+  // zvolené u mapy, ne u zbytku přehledu.
   const navstevyProMapu = useMemo(() => {
     if (!maUdalosti || !udalostiData) return null;
-    return new Map(udalostiData.displeje.map((d) => [d.displej, d.navstevyMesic]));
-  }, [maUdalosti, udalostiData]);
+    return new Map(udalostiData.displeje.map((d) => [d.displej, d.navstevy[obdobiHeat]]));
+  }, [maUdalosti, udalostiData, obdobiHeat]);
 
+  const summaryHeatData = summaryHeat?.dostupne ? summaryHeat.data : null;
   const mapa = useMemo(
-    () => naparuj(displays ?? [], summaryData, navstevyProMapu),
-    [displays, summaryData, navstevyProMapu],
+    () => naparuj(displays ?? [], summaryHeatData, navstevyProMapu),
+    [displays, summaryHeatData, navstevyProMapu],
   );
 
   // Tiché displeje: nejdůležitější věc na dashboardu, znamená spadlý tablet.
+  // Ticho je vždycky za 24 h, s přepínačem období nesouvisí.
   const tiche = udalostiData
     ? udalostiData.displeje.filter((d) => d.tichy).sort((a, b) => a.displej - b.displej)
     : [];
-  const navstivene = udalostiData
-    ? udalostiData.displeje.filter((d) => d.navstevyMesic > 0)
-    : [];
 
-  const obdobi = summaryData?.since ? formatDateTime(summaryData.since) : null;
+  // --- Návštěvy podle displeje: filtr sekce + řazení podle zvoleného období ---
+  const [filtrSekce, setFiltrSekce] = useState<string>("");
+
+  const sekce = useMemo(() => {
+    const s = new Set<string>();
+    for (const d of displays ?? []) if (d.category) s.add(d.category);
+    return [...s].sort((a, b) => a.localeCompare(b, "cs"));
+  }, [displays]);
+
+  // Sekce displeje z /api/displays; události ji neznají, párujeme přes číslo.
+  const sekceDispleje = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const d of displays ?? []) if (d.category) m.set(Number(d.id), d.category);
+    return m;
+  }, [displays]);
+
+  const radkyNavstev: StavDispleje[] = useMemo(() => {
+    if (!udalostiData) return [];
+    return udalostiData.displeje
+      .filter((d) => !filtrSekce || sekceDispleje.get(d.displej) === filtrSekce)
+      .slice()
+      .sort(
+        (a, b) =>
+          b.navstevy[obdobiNavstevy] - a.navstevy[obdobiNavstevy] || a.displej - b.displej,
+      );
+  }, [udalostiData, filtrSekce, sekceDispleje, obdobiNavstevy]);
+
+  // Průměrná doba u displeje přes celý pavilon: průměry jednotlivých displejů
+  // vážené počtem návštěv, jinak by displej se třemi návštěvami táhl čísla
+  // stejně jako displej s tisícem.
+  const prumerCelkem = useMemo(() => {
+    if (!udalostiData) return null;
+    let soucet = 0;
+    let vaha = 0;
+    for (const d of udalostiData.displeje) {
+      const doba = d.prumernaDobaS[globalniObdobi];
+      const n = d.navstevy[globalniObdobi];
+      if (doba === null || n <= 0) continue;
+      soucet += doba * n;
+      vaha += n;
+    }
+    return vaha > 0 ? Math.round(soucet / vaha) : null;
+  }, [udalostiData, globalniObdobi]);
+
+  // Kdy u kvality dat rozsvítit varovnou tečku: když se zahodí přes procento
+  // vstupu, není to šum, ale nejspíš formát, kterému parser nerozumí.
+  const vyraznaZtrata = useMemo(() => {
+    if (!udalostiData) return false;
+    const { poskozeneRadky } = udalostiData.kvalita;
+    const dobre = udalostiData.celkem.mesic.udalosti;
+    return poskozeneRadky > 0 && poskozeneRadky > (dobre + poskozeneRadky) * 0.01;
+  }, [udalostiData]);
+
+  // --- Seznamy dotazů: pevná výška, listuje se ---
+  const [stranaPosledni, setStranaPosledni] = useState(0);
+  const [stranaNezvladnute, setStranaNezvladnute] = useState(0);
+
+  const posledniSerazene = useMemo(
+    () => (posledni?.dostupne ? serazeneDotazy(posledni.data.questions) : []),
+    [posledni],
+  );
+  const nezvladnuteSerazene = useMemo(
+    () => (nezvladnute?.dostupne ? serazeneDotazy(nezvladnute.data.questions) : []),
+    [nezvladnute],
+  );
+
+  const stranPosledni = Math.max(1, Math.ceil(posledniSerazene.length / NA_STRANU));
+  const stranNezvladnute = Math.max(1, Math.ceil(nezvladnuteSerazene.length / NA_STRANU));
+
+  // Po přepnutí období se seznam zkrátí; ať kurátor nezůstane na straně,
+  // která už neexistuje.
+  useEffect(() => {
+    setStranaPosledni(0);
+    setStranaNezvladnute(0);
+  }, [obdobiDotazy]);
+
+  const posledniStrana = posledniSerazene.slice(
+    stranaPosledni * NA_STRANU,
+    stranaPosledni * NA_STRANU + NA_STRANU,
+  );
+  const nezvladnuteStrana = nezvladnuteSerazene.slice(
+    stranaNezvladnute * NA_STRANU,
+    stranaNezvladnute * NA_STRANU + NA_STRANU,
+  );
+
+  const summaryData = summary?.dostupne ? summary.data : null;
+  // Období hlásíme tak, jak ho vrátil backend chatbota, ne jak jsme o něj
+  // požádali: nemusí držet historii tak hluboko, jak si říkáme. Když se obojí
+  // liší o víc než hodinu, řekneme to nahlas — jinak by vedle sebe stálo
+  // „od dnešní půlnoci" a datum týden starý a nedávalo by to smysl.
+  const obdobiKpiOd = summaryData?.since ? formatDateTime(summaryData.since) : null;
+  const backendJineObdobi = useMemo(() => {
+    if (!summaryData?.since) return false;
+    const vraceno = Date.parse(summaryData.since);
+    if (!Number.isFinite(vraceno)) return false;
+    return Math.abs(vraceno - Date.parse(zacatekObdobi(obdobiKpi))) > 3_600_000;
+  }, [summaryData, obdobiKpi]);
   const prazdnaAnalytika = summaryData !== null && summaryData.total_questions === 0;
 
   // Kolečko jen dokud nejsou displeje (ty jsou z našeho disku, tedy hned);
@@ -433,19 +739,25 @@ export default function Dashboard() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="font-display text-3xl font-bold tracking-tight text-fg">Přehled provozu</h1>
-          <p className="text-sm text-fg-muted mt-1.5">
-            Pavilon Amphibiárium, ZOO Ostrava
-            {obdobi && <span className="text-fg-dim"> · dotazy od {obdobi}</span>}
-          </p>
+          <p className="text-sm text-fg-muted mt-1.5">Pavilon Amphibiárium, ZOO Ostrava</p>
         </div>
-        <button onClick={() => void load()} className="btn-ghost" disabled={nacitani}>
-          {nacitani ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="h-4 w-4" strokeWidth={1.75} />
-          )}
-          Obnovit
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Globální období: nastaví celý přehled a zruší vlastní nastavení sekcí. */}
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-fg-dim">
+              Období
+            </span>
+            <PrepinacObdobi hodnota={globalniObdobi} onZmena={nastavGlobalni} />
+          </div>
+          <button onClick={() => void load()} className="btn-ghost" disabled={nacitani}>
+            {nacitani ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" strokeWidth={1.75} />
+            )}
+            Obnovit
+          </button>
+        </div>
       </div>
 
       {/* Události z tabletů. Nejdřív tiché displeje: spadlý tablet je to
@@ -516,63 +828,109 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Souhrn období */}
-            <div className="grid grid-cols-2 divide-x divide-line border-y border-line sm:grid-cols-4">
-              {[
-                { popis: "Návštěv (30 dní)", hodnota: cisloCs(udalostiData.celkem.relaci) },
-                { popis: "Událostí", hodnota: cisloCs(udalostiData.celkem.udalosti) },
-                { popis: "Otevření chatbota", hodnota: cisloCs(udalostiData.celkem.chatu) },
-                { popis: "Chyb z tabletů", hodnota: cisloCs(udalostiData.celkem.chyb) },
-              ].map((k) => (
-                <div key={k.popis} className="px-5 py-4 first:pl-0">
-                  <div className="font-display text-2xl font-bold text-fg tnum">{k.hodnota}</div>
-                  <div className="text-xs text-fg-muted mt-0.5">{k.popis}</div>
-                </div>
-              ))}
+            {/* Souhrn období. Období je napsané nad čísly, ne drobně stranou:
+                dřív se tu potkávalo 30denní okno s 24h oknem u AI a nedalo se
+                poznat, co je za co. */}
+            <div>
+              <div className="mb-2 text-xs font-semibold text-fg">
+                {OBDOBI_POPIS[globalniObdobi]}
+                <span className="font-normal text-fg-muted"> · {OBDOBI_VETA[globalniObdobi]}</span>
+              </div>
+              <div className="grid grid-cols-2 divide-x divide-line border-y border-line sm:grid-cols-4">
+                {[
+                  { popis: "Návštěv", hodnota: cisloCs(udalostiData.celkem[globalniObdobi].relaci) },
+                  { popis: "Událostí", hodnota: cisloCs(udalostiData.celkem[globalniObdobi].udalosti) },
+                  { popis: "Průměr u displeje", hodnota: dobaCs(prumerCelkem) },
+                  { popis: "Tichých tabletů", hodnota: cisloCs(tiche.length) },
+                ].map((k) => (
+                  <div key={k.popis} className="px-5 py-4 first:pl-0">
+                    <div className="font-display text-2xl font-bold text-fg tnum">{k.hodnota}</div>
+                    <div className="text-xs text-fg-muted mt-0.5">{k.popis}</div>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-10 lg:grid-cols-2">
-              {/* Návštěvy podle displeje */}
+              {/* Návštěvy podle displeje. Ukazují se VŠECHNY displeje, i ty
+                  s nulou (že se nikdo nezastavil, je taky informace), ale
+                  tlumeně, ať neutopí zbytek. Pevná výška s vlastním
+                  posuvníkem drží stránku krátkou. */}
               <div>
-                <h3 className="kicker mb-3">Návštěvy podle displeje</h3>
-                {navstivene.length === 0 ? (
-                  <Hlaska text="Zatím žádná návštěva." />
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="kicker">Návštěvy podle displeje</h3>
+                  <PrepinacObdobi
+                    hodnota={obdobiNavstevy}
+                    onZmena={(o) => nastavSekci("navstevy", o)}
+                    maly
+                    vlastni={vlastniObdobi.navstevy !== undefined}
+                    onReset={() => nastavSekci("navstevy", globalniObdobi)}
+                  />
+                </div>
+
+                {sekce.length > 0 && (
+                  <select
+                    className="input mb-3 py-1.5 text-sm"
+                    value={filtrSekce}
+                    onChange={(e) => setFiltrSekce(e.target.value)}
+                    aria-label="Filtr podle sekce"
+                  >
+                    <option value="">Všechny sekce</option>
+                    {sekce.map((x) => (
+                      <option key={x} value={x}>
+                        {x}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                {radkyNavstev.length === 0 ? (
+                  <Hlaska text={filtrSekce ? "V téhle sekci není žádný displej." : "Zatím žádná návštěva."} />
                 ) : (
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left kicker">
-                        <th className="pb-2 font-semibold">Displej</th>
-                        <th className="pb-2 font-semibold text-right">Dnes</th>
-                        <th className="pb-2 font-semibold text-right">Týden</th>
-                        <th className="pb-2 font-semibold text-right">Měsíc</th>
-                        <th className="pb-2 font-semibold text-right">Průměr u displeje</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {navstivene.map((d) => (
-                        <tr key={d.displej} className="border-t border-lineSoft">
-                          <td className="py-2 pr-3">
-                            <span className="font-semibold text-fg tnum">{d.displej}</span>{" "}
-                            <span className="text-fg-muted">{druhDispleje(displays, d.displej)}</span>
-                          </td>
-                          <td className="py-2 text-right tnum text-fg-muted">{d.navstevyDnes}</td>
-                          <td className="py-2 text-right tnum text-fg-muted">{d.navstevyTyden}</td>
-                          <td className="py-2 text-right tnum font-semibold text-fg">
-                            {d.navstevyMesic}
-                          </td>
-                          <td className="py-2 text-right tnum text-fg-muted">
-                            {dobaCs(d.prumernaDobaS)}
-                          </td>
+                  <div className="max-h-[360px] overflow-y-auto pr-1">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-surface">
+                        <tr className="text-left kicker">
+                          <th className="pb-2 font-semibold">Displej</th>
+                          <th className="pb-2 font-semibold text-right">Návštěv</th>
+                          <th className="pb-2 font-semibold text-right">Průměr u displeje</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {radkyNavstev.map((d) => {
+                          const n = d.navstevy[obdobiNavstevy];
+                          return (
+                            <tr
+                              key={d.displej}
+                              className={`border-t border-lineSoft ${n === 0 ? "opacity-45" : ""}`}
+                            >
+                              <td className="py-2 pr-3">
+                                <span className="font-semibold text-fg tnum">{d.displej}</span>{" "}
+                                <span className="text-fg-muted">
+                                  {druhDispleje(displays, d.displej)}
+                                </span>
+                              </td>
+                              <td className="py-2 text-right tnum font-semibold text-fg">{n}</td>
+                              <td className="py-2 text-right tnum text-fg-muted">
+                                {dobaCs(d.prumernaDobaS[obdobiNavstevy])}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
 
               {/* Typy slidů */}
               <div className="lg:border-l lg:border-line lg:pl-10">
-                <h3 className="kicker mb-3">Co lidi otevírají</h3>
+                <h3 className="kicker mb-3">
+                  Co lidi otevírají
+                  <span className="ml-2 font-normal normal-case tracking-normal text-fg-dim">
+                    {OBDOBI_VETA[globalniObdobi]}
+                  </span>
+                </h3>
                 {udalostiData.typySlidu.length === 0 ? (
                   <Hlaska text="Zatím nikdo neotevřel žádný slide." />
                 ) : (
@@ -599,10 +957,10 @@ export default function Dashboard() {
                             )}
                           </td>
                           <td className="py-2 text-right tnum font-semibold text-fg">
-                            {cisloCs(t.otevreni)}
+                            {cisloCs(t.otevreni[globalniObdobi])}
                           </td>
                           <td className="py-2 text-right tnum text-fg-muted">
-                            {dobaCs(t.prumernaDobaS)}
+                            {dobaCs(t.prumernaDobaS[globalniObdobi])}
                           </td>
                         </tr>
                       ))}
@@ -612,59 +970,79 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Chyby z tabletů */}
-            <div>
-              <h3 className="kicker mb-3">Chyby z tabletů</h3>
-              {udalostiData.chyby.length === 0 ? (
-                <Hlaska text="Žádná chyba, tablety nic nehlásily." />
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody>
-                    {udalostiData.chyby.map((ch, i) => (
-                      <tr key={`${ch.cas}-${i}`} className="border-t border-lineSoft">
-                        <td className="py-2 pr-4 whitespace-nowrap text-fg-muted tnum">
-                          {formatDateTime(ch.cas)}
-                        </td>
-                        <td className="py-2 pr-4 whitespace-nowrap font-semibold text-fg tnum">
-                          Displej {ch.displej}
-                        </td>
-                        <td className="py-2 text-danger">{ch.zprava}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-
-            {/* Co se z dat vyhodilo. Bez téhle poznámky by tichá chyba
-                v datech vypadala jako pravda. */}
+            {/* Kvalita dat. Kurátora to nezajímá, správce ano, takže je to
+                sbalené. Úplně schovat to nejde: tichá chyba v datech by pak
+                vypadala jako pravda, proto u nadpisu svítí oranžová tečka,
+                když se zahazuje nezanedbatelný kus vstupu. */}
             {(udalostiData.kvalita.zahozenaTrvani > 0 ||
               udalostiData.kvalita.poskozeneRadky > 0 ||
               udalostiData.kvalita.neznameTypy.length > 0) && (
-              <p className="text-xs text-fg-muted">
-                <span className="font-semibold text-fg">Poznámka k datům:</span>{" "}
-                {udalostiData.kvalita.zahozenaTrvani > 0 && (
-                  <>
-                    {udalostiData.kvalita.zahozenaTrvani}× se do průměrů nezapočítalo trvání delší
-                    než celá relace (zbytek stopek z minulé relace).{" "}
-                  </>
-                )}
-                {udalostiData.kvalita.poskozeneRadky > 0 && (
-                  <>{udalostiData.kvalita.poskozeneRadky}× se přeskočil poškozený řádek. </>
-                )}
-                {udalostiData.kvalita.neznameTypy.length > 0 && (
-                  <>
-                    Neznámé typy slidů z tabletu:{" "}
-                    {udalostiData.kvalita.neznameTypy.join(", ")}.
-                  </>
-                )}
-              </p>
+              <details className="rounded-lg border border-line bg-canvas px-4 py-2.5">
+                <summary className="cursor-pointer text-xs font-semibold text-fg-muted">
+                  Kvalita dat (pro správce)
+                  {vyraznaZtrata && (
+                    <span
+                      className="ml-2 inline-block h-1.5 w-1.5 rounded-full bg-amber align-middle"
+                      title="Zahazuje se nezanedbatelná část vstupu, koukněte se na to"
+                    />
+                  )}
+                </summary>
+                <p className="mt-2 text-xs text-fg-muted">
+                  {udalostiData.kvalita.zahozenaTrvani > 0 && (
+                    <>
+                      {cisloCs(udalostiData.kvalita.zahozenaTrvani)}× se do průměrů nezapočítalo
+                      trvání delší než celá relace (zbytek stopek z minulé relace).{" "}
+                    </>
+                  )}
+                  {udalostiData.kvalita.poskozeneRadky > 0 && (
+                    <>
+                      {cisloCs(udalostiData.kvalita.poskozeneRadky)}× se přeskočil poškozený řádek.{" "}
+                    </>
+                  )}
+                  {udalostiData.kvalita.neznameTypy.length > 0 && (
+                    <>
+                      Neznámé typy slidů z tabletu:{" "}
+                      {udalostiData.kvalita.neznameTypy.join(", ")}.
+                    </>
+                  )}
+                </p>
+                <p className="mt-1.5 text-[11px] text-fg-dim">
+                  Čte se {udalostiData.od} až {udalostiData.do} ze složky udalosti/unity. Ukázky
+                  odmítnutých řádků píše server do logu s předponou [udalosti].
+                </p>
+              </details>
             )}
           </>
         )}
       </section>
 
-      {/* KPI ze summary; co z dat nejde spočítat, tady není */}
+      {/* Dotazy na AI. Vlastní přepínač období; období se píše tak, jak ho
+          vrátil backend chatbota, ne jak jsme o něj požádali. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="kicker">Dotazy na AI</div>
+          <div className="mt-1 text-[11px]">
+            {backendJineObdobi ? (
+              <span className="text-amber-deep">
+                Chatbot vrátil data <span className="tnum">od {obdobiKpiOd}</span>, ne za{" "}
+                {OBDOBI_VETA[obdobiKpi]} — tak hluboko historii nedrží.
+              </span>
+            ) : (
+              <span className="text-fg-dim">
+                {OBDOBI_VETA[obdobiKpi]}
+                {obdobiKpiOd && <span className="tnum"> · od {obdobiKpiOd}</span>}
+              </span>
+            )}
+          </div>
+        </div>
+        <PrepinacObdobi
+          hodnota={obdobiKpi}
+          onZmena={(o) => nastavSekci("aiKpi", o)}
+          maly
+          vlastni={vlastniObdobi.aiKpi !== undefined}
+          onReset={() => nastavSekci("aiKpi", globalniObdobi)}
+        />
+      </div>
       {summaryData && !prazdnaAnalytika && (
         <div className="grid grid-cols-3 divide-x divide-line border-y border-line">
           {[
@@ -686,13 +1064,13 @@ export default function Dashboard() {
       {prazdnaAnalytika && (
         <Hlaska
           text={BEZ_DOTAZU}
-          detail={`Chatbot je připojený, za sledované období${obdobi ? ` (od ${obdobi})` : ""} ale nezaznamenal žádný dotaz.`}
+          detail={`Chatbot je připojený, za ${OBDOBI_VETA[obdobiKpi]} ale nezaznamenal žádný dotaz.`}
         />
       )}
 
       {/* Mapa dotazů: hero na ploše, bez rámečku */}
       <section className="space-y-5">
-        <div className="flex items-end justify-between gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <div className="kicker">
               {navstevyProMapu ? "Kde se lidi zastavují" : "Mapa dotazů na AI"}
@@ -700,7 +1078,20 @@ export default function Dashboard() {
             <h2 className="font-display text-lg font-semibold text-fg mt-1.5">
               Půdorys pavilonu
             </h2>
+            {/* Mapa barví buď návštěvy z tabletů, nebo (když nejsou) dotazy na
+                AI. S přepínačem období musí být vidět, co se zrovna barví. */}
+            <div className="mt-1 text-[11px] text-fg-dim">
+              Barví: {navstevyProMapu ? "návštěvy z tabletů" : "dotazy na AI"} ·{" "}
+              {OBDOBI_VETA[obdobiHeat]}
+            </div>
           </div>
+          <PrepinacObdobi
+            hodnota={obdobiHeat}
+            onZmena={(o) => nastavSekci("heatmapa", o)}
+            maly
+            vlastni={vlastniObdobi.heatmapa !== undefined}
+            onReset={() => nastavSekci("heatmapa", globalniObdobi)}
+          />
           {mapa.maxNode && (
             <div className="text-right">
               <div className="font-display text-xl font-bold text-fg tnum leading-none">
@@ -794,8 +1185,10 @@ export default function Dashboard() {
                     Displej {hover.n}
                   </div>
                   <div className="text-[11px] text-fg-muted">{hover.popis}</div>
-                  {summaryData && (
-                    <div className="text-[11px] text-fg-muted tnum">{pocetDotazu(hover.count)}</div>
+                  {(summaryHeatData || navstevyProMapu) && (
+                    <div className="text-[11px] text-fg-muted tnum">
+                      {navstevyProMapu ? `${cisloCs(hover.count)}× návštěva` : pocetDotazu(hover.count)}
+                    </div>
                   )}
                 </div>
               )}
@@ -803,7 +1196,7 @@ export default function Dashboard() {
 
             {/* Legenda a poznámky zarovnané pod mapu */}
             <div className="mx-auto w-full max-w-[760px] space-y-2.5">
-            {summaryData ? (
+            {summaryHeatData || navstevyProMapu ? (
               <>
                 <div className="flex items-center gap-3 text-[11px] text-fg-dim max-w-md">
                   <span>Méně</span>
@@ -824,7 +1217,7 @@ export default function Dashboard() {
                   </p>
                 )}
               </>
-            ) : !summary ? (
+            ) : !summaryHeat ? (
               <Cekam />
             ) : (
               <Hlaska
@@ -862,73 +1255,105 @@ export default function Dashboard() {
 
       <Divider />
 
-      {/* Dvousloupcový editorial spread: poslední dotazy | co AI nezvládla */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-        <section>
-          <div className="flex items-baseline justify-between gap-3 mb-5">
-            <div className="kicker">Poslední dotazy návštěvníků</div>
-            {posledni?.dostupne && posledni.data.total > VYPSAT_POSLEDNI && (
-              <span className="text-[11px] text-fg-dim tnum">
-                {VYPSAT_POSLEDNI} z {cisloCs(posledni.data.total)}
-              </span>
-            )}
+      {/* Dvousloupcový editorial spread: poslední dotazy | co AI nezvládla.
+          Oba sloupce mají pevnou výšku a listuje se v nich, jinak se přehled
+          natáhne přes celou obrazovku. Období řídí jeden přepínač pro obě
+          sekce: jsou to dva pohledy na tytéž dotazy. */}
+      <div>
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+          <div className="text-[11px] text-fg-dim">
+            Dotazy návštěvníků · {OBDOBI_VETA[obdobiDotazy]}
           </div>
-          {!posledni && <Cekam />}
-          {/* Důvod nedostupnosti je jednou nahoře, tady by se jen opakoval. */}
-          {posledni && !posledni.dostupne && <Hlaska text={NEPRIPOJENO} />}
-          {posledni?.dostupne && posledni.data.questions.length === 0 && (
-            <Hlaska text={BEZ_DOTAZU} />
-          )}
-          {posledni?.dostupne && posledni.data.questions.length > 0 && (
-            <ul className="divide-y divide-lineSoft">
-              {nejnovejsi(posledni.data.questions, VYPSAT_POSLEDNI).map((q, i) => (
-                <li key={`${q.session_id}-${q.timestamp}-${i}`} className="py-3">
-                  <div className="text-sm text-fg">{q.user_message}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-fg-dim">
-                    <span>{druhLabel(q)}</span>
-                    <span>·</span>
-                    <span className="tnum">{formatDateTime(q.timestamp)}</span>
-                    {!q.answered && <span className="text-amber">· bez odpovědi</span>}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+          <PrepinacObdobi
+            hodnota={obdobiDotazy}
+            onZmena={(o) => nastavSekci("dotazy", o)}
+            maly
+            vlastni={vlastniObdobi.dotazy !== undefined}
+            onReset={() => nastavSekci("dotazy", globalniObdobi)}
+          />
+        </div>
 
-        <section className="lg:border-l lg:border-line lg:pl-10">
-          <div className="flex items-baseline justify-between gap-3 mb-5">
-            <div className="kicker">Co AI nezvládla</div>
-            {nezvladnute?.dostupne && nezvladnute.data.total > VYPSAT_NEZVLADNUTE && (
-              <span className="text-[11px] text-fg-dim tnum">
-                {VYPSAT_NEZVLADNUTE} z {cisloCs(nezvladnute.data.total)}
-              </span>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+          <section>
+            <div className="flex items-baseline justify-between gap-3 mb-5">
+              <div className="kicker">Poslední dotazy návštěvníků</div>
+              {posledni?.dostupne && posledni.data.total > 0 && (
+                <span className="text-[11px] text-fg-dim tnum">
+                  {cisloCs(posledniSerazene.length)} z {cisloCs(posledni.data.total)}
+                </span>
+              )}
+            </div>
+            {!posledni && <Cekam />}
+            {/* Důvod nedostupnosti je jednou nahoře, tady by se jen opakoval. */}
+            {posledni && !posledni.dostupne && <Hlaska text={NEPRIPOJENO} />}
+            {posledni?.dostupne && posledni.data.questions.length === 0 && (
+              <Hlaska text={BEZ_DOTAZU} />
             )}
-          </div>
-          {!nezvladnute && <Cekam />}
-          {nezvladnute && !nezvladnute.dostupne && <Hlaska text={NEPRIPOJENO} />}
-          {nezvladnute?.dostupne && nezvladnute.data.questions.length === 0 && (
-            <Hlaska
-              text="Zatím žádné nezvládnuté dotazy."
-              detail="Všechny zaznamenané dotazy chatbot odpověděl."
-            />
-          )}
-          {nezvladnute?.dostupne && nezvladnute.data.questions.length > 0 && (
-            <ul className="divide-y divide-lineSoft">
-              {nejnovejsi(nezvladnute.data.questions, VYPSAT_NEZVLADNUTE).map((q, i) => (
-                <li key={`${q.session_id}-${q.timestamp}-${i}`} className="py-3">
-                  <div className="text-sm text-fg">{q.user_message}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber" />
-                    <span>{druhLabel(q)}</span>
-                    <span>·</span>
-                    <span className="tnum">{formatDateTime(q.timestamp)}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+            {posledni?.dostupne && posledni.data.questions.length > 0 && (
+              <>
+                <ul className="min-h-[420px] divide-y divide-lineSoft">
+                  {posledniStrana.map((q, i) => (
+                    <li key={`${q.session_id}-${q.timestamp}-${i}`} className="py-3">
+                      <div className="text-sm text-fg">{q.user_message}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-fg-dim">
+                        <span>{druhLabel(q)}</span>
+                        <span>·</span>
+                        <span className="tnum">{formatDateTime(q.timestamp)}</span>
+                        {!q.answered && <span className="text-amber">· bez odpovědi</span>}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <Strankovani
+                  strana={stranaPosledni}
+                  stran={stranPosledni}
+                  onZmena={setStranaPosledni}
+                />
+              </>
+            )}
+          </section>
+
+          <section className="lg:border-l lg:border-line lg:pl-10">
+            <div className="flex items-baseline justify-between gap-3 mb-5">
+              <div className="kicker">Co AI nezvládla</div>
+              {nezvladnute?.dostupne && nezvladnute.data.total > 0 && (
+                <span className="text-[11px] text-fg-dim tnum">
+                  {cisloCs(nezvladnuteSerazene.length)} z {cisloCs(nezvladnute.data.total)}
+                </span>
+              )}
+            </div>
+            {!nezvladnute && <Cekam />}
+            {nezvladnute && !nezvladnute.dostupne && <Hlaska text={NEPRIPOJENO} />}
+            {nezvladnute?.dostupne && nezvladnute.data.questions.length === 0 && (
+              <Hlaska
+                text="Zatím žádné nezvládnuté dotazy."
+                detail="Všechny zaznamenané dotazy chatbot odpověděl."
+              />
+            )}
+            {nezvladnute?.dostupne && nezvladnute.data.questions.length > 0 && (
+              <>
+                <ul className="min-h-[420px] divide-y divide-lineSoft">
+                  {nezvladnuteStrana.map((q, i) => (
+                    <li key={`${q.session_id}-${q.timestamp}-${i}`} className="py-3">
+                      <div className="text-sm text-fg">{q.user_message}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
+                        <span className="h-1.5 w-1.5 rounded-full bg-amber" />
+                        <span>{druhLabel(q)}</span>
+                        <span>·</span>
+                        <span className="tnum">{formatDateTime(q.timestamp)}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <Strankovani
+                  strana={stranaNezvladnute}
+                  stran={stranNezvladnute}
+                  onZmena={setStranaNezvladnute}
+                />
+              </>
+            )}
+          </section>
+        </div>
       </div>
 
       <Divider />

@@ -14,7 +14,6 @@ import {
   Bot,
   Clock,
   Loader2,
-  MessageSquare,
   RefreshCw,
   Users,
 } from "lucide-react";
@@ -219,6 +218,18 @@ export default function Analytika() {
     [data],
   );
 
+  // Oranžová tečka u „Kvalita dat": zahazuje se nezanedbatelný kus vstupu?
+  // Kolik řádků dorazilo celkem nevíme (souhrny drží jen výsledky, ne počet
+  // řádků), takže se to poměřuje proti počtu událostí, které se přečíst
+  // podařily. Je to odhad, a stačí: jde o to, aby se na tichou chybu přišlo,
+  // ne o přesné procento.
+  const vyraznaZtrata = useMemo(() => {
+    if (!data) return false;
+    const { poskozeneRadky } = data.kvalita;
+    const precteno = data.celkem.relaci + data.celkem.zobrazeni;
+    return poskozeneRadky > 0 && poskozeneRadky > (precteno + poskozeneRadky) * 0.01;
+  }, [data]);
+
   const c: SouhrnObdobi | undefined = data?.celkem;
   const p = data?.porovnani?.celkem;
   const prazdno = !!data && data.celkem.relaci === 0 && data.celkem.zobrazeni === 0;
@@ -334,39 +345,60 @@ export default function Analytika() {
 
       {chyba && <p className="text-sm text-danger">{chyba}</p>}
 
-      {/* Upozornění na rozbitá data. Zmizí samo, až budou všechny tablety
-          posílat čitelné řádky — dokud se tak nestane, nesmí graf vypadat
-          jako „do pavilonu nikdo nechodí". */}
-      {data && (data.kvalita.poskozeneRadky > 0 || data.kvalita.displejuSData < data.kvalita.displejuCelkem) && (
+      {/* Kolik displejů vůbec posílá data, zůstává vidět: to není technikálie,
+          ale to hlavní, co se o číslech níž musí vědět — jsou jen z části
+          pavilonu. Naopak poškozené řádky a neznámé typy slidů kurátorovi nic
+          neříkají a dělaly nahoře poplach, takže jsou sbalené stejně jako
+          v přehledu. */}
+      {data && data.kvalita.displejuSData < data.kvalita.displejuCelkem && (
         <div className="flex items-start gap-2.5 rounded-lg bg-amber-soft px-4 py-3 text-sm text-amber-deep">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.75} />
           <div>
-            {data.kvalita.displejuSData < data.kvalita.displejuCelkem && (
-              <>
-                Data posílá{" "}
-                <strong className="font-semibold">{data.kvalita.displejuSData}</strong> z{" "}
-                {data.kvalita.displejuCelkem} displejů
-                {data.kvalita.poskozeneRadky > 0 ? " a " : ". "}
-              </>
-            )}
-            {data.kvalita.poskozeneRadky > 0 && (
-              <>
-                <strong className="font-semibold">{cislo(data.kvalita.poskozeneRadky)}</strong>{" "}
-                řádků logu se nepodařilo přečíst.{" "}
-              </>
-            )}
-            Čísla níž jsou jen z toho, co dorazilo čitelné — zbytek doplní tablety samy, až budou
-            zapisovat ve správném formátu.
-            {data.kvalita.neznameTypy.length > 0 && (
-              <> Neznámé typy slidů: {data.kvalita.neznameTypy.join(", ")}.</>
-            )}
+            Data posílá <strong className="font-semibold">{data.kvalita.displejuSData}</strong> z{" "}
+            {data.kvalita.displejuCelkem} displejů. Čísla níž jsou jen z nich, zbytek se doplní sám,
+            až začnou tablety zapisovat.
           </div>
         </div>
       )}
 
+      {data &&
+        (data.kvalita.poskozeneRadky > 0 ||
+          data.kvalita.zahozenaTrvani > 0 ||
+          data.kvalita.neznameTypy.length > 0) && (
+          <details className="rounded-lg border border-line bg-canvas px-4 py-2.5">
+            <summary className="cursor-pointer text-xs font-semibold text-fg-muted">
+              Kvalita dat (pro správce)
+              {vyraznaZtrata && (
+                <span
+                  className="ml-2 inline-block h-1.5 w-1.5 rounded-full bg-amber align-middle"
+                  title="Zahazuje se nezanedbatelná část vstupu, koukněte se na to"
+                />
+              )}
+            </summary>
+            <p className="mt-2 text-xs text-fg-muted">
+              {data.kvalita.poskozeneRadky > 0 && (
+                <>{cislo(data.kvalita.poskozeneRadky)}× se přeskočil poškozený řádek logu. </>
+              )}
+              {data.kvalita.zahozenaTrvani > 0 && (
+                <>
+                  {cislo(data.kvalita.zahozenaTrvani)}× se do průměrů nezapočítalo trvání delší než
+                  celá relace (zbytek stopek z minulé relace).{" "}
+                </>
+              )}
+              {data.kvalita.neznameTypy.length > 0 && (
+                <>Neznámé typy slidů z tabletu: {data.kvalita.neznameTypy.join(", ")}.</>
+              )}
+            </p>
+            <p className="mt-1.5 text-[11px] text-fg-dim">
+              Čte se {data.od} až {data.do} ze složky udalosti/unity. Ukázky odmítnutých řádků píše
+              server do logu s předponou [udalosti].
+            </p>
+          </details>
+        )}
+
       {/* Souhrnné dlaždice */}
       {c && (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Dlazdice
             ikona={Users}
             popis="Relací"
@@ -381,6 +413,11 @@ export default function Analytika() {
             hodnota={doba(c.prumernaDobaS)}
             podpis="jedna relace od začátku do konce"
           />
+          {/* „Skutečné dotazy" tu bývaly čtvrtou dlaždicí a počítaly akci
+              `otevren_chat`. Tu ale Unity neposílá (ověřeno nad celými
+              produkčními logy), takže ukazovaly natvrdo nulu a vypadalo to,
+              že se návštěvníci AI neptají. Kolik dotazů doopravdy padlo, ví
+              Danielův backend a je to v dashboardu. */}
           <Dlazdice
             ikona={Bot}
             popis="Otevření AI slidu"
@@ -388,14 +425,6 @@ export default function Analytika() {
             podpis="kolikrát se AI slide zobrazil"
             ted={c.aiZobrazeni}
             drive={p?.aiZobrazeni}
-          />
-          <Dlazdice
-            ikona={MessageSquare}
-            popis="Skutečné dotazy"
-            hodnota={cislo(c.aiDotazy)}
-            podpis="kolikrát se někdo opravdu zeptal"
-            ted={c.aiDotazy}
-            drive={p?.aiDotazy}
           />
         </div>
       )}

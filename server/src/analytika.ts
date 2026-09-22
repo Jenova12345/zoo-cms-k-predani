@@ -29,7 +29,12 @@ export interface DenniSouhrn {
   // se nedá započítat dvakrát.
   relaci: number;
   zobrazeni: Record<string, number>; // typ slidu → počet zobrazení
-  otevreniChatu: number; // akce `otevren_chat` = někdo se AI opravdu zeptal
+  // Akce `otevren_chat`. Produkční Unity ji NEPOSÍLÁ (ověřeno nad celými logy),
+  // takže je to prakticky vždy 0 a do API ani do stránky se už nedostane.
+  // Počítat ji stojí jeden `if`, a kdyby ji Michal někdy začal posílat, máme
+  // ji rovnou i zpětně — proto se z uložených souhrnů nemaže. Kolik dotazů
+  // na AI doopravdy padlo, ví Danielův backend (dashboard, `analytics.ts`).
+  otevreniChatu: number;
   // Doby se drží jako SOUČET a POČET, ne jako průměr. Průměrovat denní
   // průměry by dalo tichému čtvrtku stejnou váhu jako narvané sobotě.
   soucetTrvaniS: number;
@@ -159,7 +164,14 @@ interface MesicCache {
   dny: Record<string, ZaznamCache>; // klíč = cesta souboru relativně k UDALOSTI_DIR
 }
 
-const VERZE_CACHE = 1;
+// Uložené souhrny se počítaly tehdejším parserem. Když se změní to, CO se
+// z řádku přečte, musí se číslo zvýšit — jinak by se dál sčítaly staré
+// výsledky a oprava by se v číslech nikdy neprojevila.
+//
+//   1 → 2  parser přestal zahazovat řádky s nečíselným polem `displej`
+//          (`"Kiosek_5"` i neuvozovkované `Kiosek_5`, viz udalosti.ts).
+//          Souhrny se po nasazení jednou přepočítají z logů, ~6 s na rok.
+const VERZE_CACHE = 2;
 
 // Paměť procesu i to, co leží na disku. Klíčem je vždycky (mtime, velikost)
 // souboru — dnešní den se tím počítá pokaždé znovu (tablety do něj pořád
@@ -321,7 +333,6 @@ export interface SouhrnObdobi {
   zobrazeni: number;
   prumernaDobaS: number | null; // doba u displeje = rozpětí jedné relace
   aiZobrazeni: number; // otevření AI slidu
-  aiDotazy: number; // akce otevren_chat = někdo se doopravdy zeptal
 }
 
 export interface RadekZebricku {
@@ -374,12 +385,10 @@ function secti(souhrny: DenniSouhrn[]): SouhrnObdobi {
   let relaci = 0;
   let zobrazeni = 0;
   let aiZobrazeni = 0;
-  let aiDotazy = 0;
   let relaciSDobou = 0;
   let soucetDob = 0;
   for (const s of souhrny) {
     relaci += s.relaci;
-    aiDotazy += s.otevreniChatu;
     relaciSDobou += s.relaciSDobou;
     soucetDob += s.soucetDobRelaciS;
     for (const [typ, pocet] of Object.entries(s.zobrazeni)) {
@@ -393,7 +402,6 @@ function secti(souhrny: DenniSouhrn[]): SouhrnObdobi {
     // Průměr ze SOUČTU a POČTU, ne z průměrů dnů.
     prumernaDobaS: relaciSDobou ? Math.round(soucetDob / relaciSDobou) : null,
     aiZobrazeni,
-    aiDotazy,
   };
 }
 
