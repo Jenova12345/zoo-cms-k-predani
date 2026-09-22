@@ -199,6 +199,25 @@ export interface RadekTypu {
   prumernaDobaS: number | null;
 }
 
+// Jeden řádek porovnání sekcí (zón expozice).
+export interface RadekSekce {
+  sekce: string;
+  displeju: number;
+  relaci: number;
+  zobrazeni: number;
+  prumernaDobaS: number | null;
+  prumerSlidu: number | null;
+}
+
+// Kdy lidi chodí: mřížka den v týdnu (0 = pondělí) × hodina (0–23),
+// hodnoty jsou počty začátých relací.
+export interface KdyChodi {
+  mrizka: number[][];
+  max: number;
+}
+
+export const DNY_V_TYDNU = ["Po", "Út", "St", "Čt", "Pá", "So", "Ne"];
+
 export interface AnalytikaNavstevnosti {
   od: string;
   do: string;
@@ -208,6 +227,10 @@ export interface AnalytikaNavstevnosti {
   porovnani: { od: string; do: string; celkem: SouhrnObdobi } | null;
   displeje: RadekZebricku[];
   typySlidu: RadekTypu[];
+  sekce: RadekSekce[];
+  kdyChodi: KdyChodi;
+  slidyNaRelaci: { kose: { kos: string; relaci: number }[]; prumer: number | null };
+  prvniDenSDaty: string | null;
   kvalita: {
     poskozeneRadky: number;
     zahozenaTrvani: number;
@@ -262,11 +285,27 @@ export interface PrehledUdalosti {
   od: string;
   do: string;
   maData: boolean;
+  // Od kdy do kdy každé období sahá (ISO). Počítá je server, ať popisek nad
+  // čísly nemůže říkat něco jiného, než co se sečetlo.
+  hranice: PodleObdobi<{ od: string; do: string }>;
+  prvniDenSDaty: string | null; // nejstarší den, ze kterého máme log
   celkem: PodleObdobi<{ relaci: number; udalosti: number }>;
   displeje: StavDispleje[];
   typySlidu: StavTypuSlidu[];
   ticheDispleje: number[];
   kvalita: { poskozeneRadky: number; zahozenaTrvani: number; neznameTypy: string[] };
+}
+
+// --- Vyřešené dotazy na AI ---
+// Dotazy dodává Danielův backend a je jen ke čtení, poznámka „doplněno do KB"
+// leží u nás. Klíč si počítá server z dotazu (server/src/kbDotazy.ts).
+
+export interface VyresenyDotaz {
+  cas: string;
+  uzivatel: string;
+  jmeno?: string;
+  otazka: string;
+  druh: string;
 }
 
 // --- Analytika chatbota (Danielův backend) ---
@@ -275,6 +314,9 @@ export interface PrehledUdalosti {
 // pole ani nedostupný backend dashboard neshodí.
 
 export interface AnalyticsQuestion {
+  // Náš klíč pro označení „vyřešeno". Dopočítává ho server, v kontraktu od
+  // Daniela žádné `id` není (viz server/src/kbDotazy.ts).
+  klic: string;
   timestamp: string;
   session_id: string;
   display_id: number | null; // může být null, druh párujeme přes species_latin

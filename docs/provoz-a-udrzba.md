@@ -360,6 +360,7 @@ Vše je pod `DATA_ROOT` (výchozí `<repo>/data`):
   Cervori/<cokoli>.mp4          „díra v zemi" č. 1, viz kapitola 15
   Paleonaleziste/<cokoli>.mp4   „díra v zemi" č. 2
   audit.jsonl                   append-only audit log
+  kb-vyreseno.json              dotazy na AI odškrtnuté jako doplněné do KB
   prales.json                   nastavení displeje u deštného pralesa
   jmena.json                    seznam jmen lidí u sdíleného účtu
   users.json                    účty kurátorů (bcrypt hashe), práva 0600
@@ -381,7 +382,8 @@ přestal zakládat složky, které na disku pořád jsou.
 
 **Servírování přes HTTP** je zúžené na `displeje/`: `@fastify/static` má root
 `<DATA_ROOT>/displeje` a prefix `/data/displeje/`. `users.json`, `session.key`,
-`jmena.json`, `audit.jsonl`, `udalosti/` ani `analytika/` proto přes `/data/...`
+`jmena.json`, `audit.jsonl`, `kb-vyreseno.json`, `udalosti/` ani `analytika/`
+proto přes `/data/...`
 stáhnout nejdou.
 
 Uvnitř `displeje/` se servíruje všechno včetně `*.png.orig` a `.vyrezy.json`.
@@ -1036,14 +1038,19 @@ chodí s ročním rozsahem. Naměřeno na roce syntetických dat (31 displejů �
 | přes denní souhrny, z paměti | 119 ms | 18 MB |
 
 Proto se z každé dvojice (den, displej) udělá **denní souhrn** — hrstka čísel
-místo tisíců událostí. Soubor minulého dne se už nikdy nezmění, takže se
+místo tisíců událostí: relace, zobrazení po typech slidů, doby, a navíc
+`poHodinach` (24 čísel, kdy relace začaly) a `slidyNaRelaci` (histogram
+1 / 2 / 3 / 4–5 / 6–10 / 11+). Z těch dvou se v Analytice skládá mřížka
+„kdy lidi chodí" (den v týdnu × hodina) a „kolik slidů projde návštěvník",
+aniž by se kvůli tomu musely znovu číst logy. Soubor minulého dne se už nikdy nezmění, takže se
 počítá právě jednou. Dotaz na libovolný rozsah je pak jen sečtení souhrnů.
 
 Souhrny se ukládají do **`<DATA_ROOT>/analytika/RRRR-MM.json`** (jeden soubor
 na měsíc, 2,5 MB za celý rok), aby restart serveru neznamenal šestisekundové
 čekání na první otevření stránky.
 
-> **Když se změní parser, musí se zvýšit `VERZE_CACHE`** v `analytika.ts`.
+> **Když se změní parser NEBO tvar denního souhrnu, musí se zvýšit
+> `VERZE_CACHE`** v `analytika.ts`.
 > Uložené souhrny se počítaly tím starým; bez zvýšení čísla by se dál sčítaly
 > staré výsledky a oprava by se v číslech nikdy neprojevila. Po zvýšení se
 > souhrny jednou přepočítají z logů (~6 s na rok) a pak jede všechno jako dřív.
@@ -1087,8 +1094,26 @@ nedá započítat dvakrát.
 ```
 
 Přepnutí období v dashboardu proto **negeneruje žádný další požadavek** na
-server, jen se sáhne do jiné větve už stažené odpovědi. „Den" je od dnešní
-půlnoci, „týden" posledních 7 dnů, „měsíc" posledních 30 dnů.
+server, jen se sáhne do jiné větve už stažené odpovědi.
+
+Všechna tři období jsou **posuvná okna od teď zpátky**: „den" je posledních
+**24 hodin**, „týden" 7 dnů, „měsíc" 30 dnů.
+
+> **„Den" NENÍ „od půlnoci".** Dřív byl a v noci a brzo ráno pak bylo všude
+> nula, protože pavilon má zavřeno — číslo neříkalo nic o provozu, jen kolik
+> je hodin. Okno proto přetéká do včerejška a popisky to musí přiznat:
+> v CMS stojí „posledních 24 hodin", nikde „dnes".
+
+Odpověď navíc nese `hranice` (od–do pro každé období jako ISO čas)
+a `prvniDenSDaty` (nejstarší den, ze kterého máme log — bere se z názvů
+souborů, obsah se kvůli tomu nečte). Dashboard proto píše konkrétní rozsah
+i větu „data od …", aby prázdný graf za starší období nevypadal jako výpadek.
+
+**Okno a čtené soubory musí sedět.** Nejdelší období je posuvných `dny` × 24 h,
+takže se soubory čtou od kalendářního dne, ve kterém okno začíná (o den víc,
+než kolik je období dlouhé). Události starší než začátek okna se pak zahodí.
+Bez toho by při otevření večer chyběl skoro celý první den a číslo by bylo
+tiše podstřelené.
 
 Dashboard má **globální přepínač nahoře** (výchozí „den") a u každé sekce
 (návštěvy podle displejů, typy slidů, heat mapa, dotazy na AI, poslední
@@ -1124,11 +1149,16 @@ poběží jinde, nastaví se celá adresa včetně portu (např.
 
 | Metoda | Cesta na straně chatbota | Parametry |
 |---|---|---|
-| GET | `/analytics/questions` | `since` (ISO, volitelný, default 24 h), `limit` (default 500, max 2000), `answered` (`true`/`false`) |
+| GET | `/analytics/questions` | `since` (ISO, volitelný, default 24 h), `limit` (default 500, **max 2000**), `answered` (`true`/`false`) |
 | GET | `/analytics/summary` | `since` (ISO, volitelný) |
 
 Bez autentizace. `questions` vrací `{questions[], total, since}`, `summary`
 vrací `{since, total_questions, answered, unanswered, per_species[]}`.
+
+> **Strop 2000 dotazů na požadavek a stránkování kontrakt neumí.** Graf
+> „Dotazy na AI v čase" v Analytice proto může být jen z části dat. Když
+> `total` > počet vrácených dotazů, **napíše se to nad grafem** místo aby se
+> nakreslila křivka, která vypadá jako celý obrázek.
 
 **`display_id` může být `null`.** Druh se proto páruje primárně přes
 `species_latin` proti `latin_name` v našich `meta.json` (obě strany se
@@ -1174,7 +1204,23 @@ z pole `since` v odpovědi a při nesouladu větším než hodina se rovnou nap�
 
 ### Heat mapa nad půdorysem pavilonu
 
-Mapa dotazů kreslí body na **oficiální půdorys pavilonu od ZOO**:
+> **Mapa je v Analytice, ne v dashboardu** (záložka „Chování"). Dashboard má
+> ukazovat AKTUÁLNÍ STAV — tablety, dnešní čísla, poslední dotazy, co AI
+> nezvládla. Mapa je pohled na delší období, takže patří k analytice.
+> Kreslení je ve společné komponentě `web/src/components/HeatMapa.tsx`.
+
+**Barva se škáluje od nejmenší po největší naměřenou hodnotu, ne od nuly.**
+Displeje mívají podobná čísla (třeba 400 až 1300 návštěv) a škála od nuly by
+je obarvila skoro stejně. Proto:
+
+- počítá se jen z displejů, které data **mají**; nula znamená „tablet nic
+  neposlal", ne „nejméně navštívený", a takový bod zůstává šedý,
+- když mají všechny stejné číslo, dostanou prostřední odstín — tvrdit
+  o jednom z nich „tenhle je nejmíň" by byla lež,
+- **legenda musí nést krajní čísla.** U relativní škály znamená nejtmavší bod
+  „nejvíc z toho, co tu je", ne „hodně"; bez čísel by to bylo zavádějící.
+
+Mapa kreslí body na **oficiální půdorys pavilonu od ZOO**:
 `web/public/pavilon-pudorys.png` (kopie `podklady/Amphibiarium_mapa 1.png`,
 6459 × 6434 px, verze s čísly displejů). Obrázek se servíruje jako statický soubor z `web/dist`, mapa
 i body drží poměr stran a škálují se se šířkou okna (souřadnice jsou v %).
@@ -1228,6 +1274,36 @@ fialového trojbloku** u sekce 8.
 - Bez dat z chatbota se body kreslí **neutrálně**, žádná vymyšlená intenzita.
 - Displeje, které v CMS jsou, ale na plánku nejsou (v CMS je 37 složek, plánek
   má 31), dashboard vypíše pod mapou. Stejně tak obráceně.
+
+### Vyřešené dotazy („doplněno do KB")
+
+U seznamu „Co AI nezvládla" je tlačítko **Vyřešeno / doplněno do KB**.
+Odškrtnuté dotazy se schovají, jde je zobrazit a vrátit zpět, a každá změna
+jde do auditu i se jménem člověka.
+
+**Proč to leží u nás:** dotazy dodává Danielův backend a ten je jen ke čtení,
+nemáme kam si do něj poznamenat, že je něco hotové. Ukládá se to tedy do
+`<DATA_ROOT>/kb-vyreseno.json` (atomický zápis, `server/src/kbDotazy.ts`).
+
+**Proč si počítáme klíč:** dotaz z kontraktu **nemá žádné `id`**. Klíč je
+proto otisk (SHA-256, prvních 16 znaků) trojice, která jeden konkrétní dotaz
+určuje: `timestamp | session_id | user_message`, po srovnání času na ISO tvar
+a slepení bílých znaků. Pořadí v odpovědi ani doba čtení do klíče nevstupují.
+
+**Počítá ho SERVER, ne prohlížeč.** `crypto.subtle` je v prohlížeči dostupné
+jen v bezpečném kontextu a CMS jede po HTTP na privátní adrese
+(`10.10.10.10:3000`), kde by nebylo vůbec. Server proto ke každému dotazu
+přibalí pole `klic` a prohlížeč ho jen posílá zpátky.
+
+> **Čím je to křehké:** kdyby backend změnil formát času nebo začal text
+> dotazu ořezávat, klíče se rozejdou a vyřešené dotazy se objeví jako
+> nevyřešené. Nic se neztratí (soubor zůstane i s textem otázky a jménem
+> toho, kdo ji odškrtl), ale bude to vypadat jako chyba. Spolehlivé by bylo
+> jedině `id` přímo od Daniela — stojí za to ho o něj požádat.
+
+Odškrtnutí platí **pro jeden konkrétní dotaz**, ne pro všechny se stejným
+textem. Když se stejná otázka objeví od jiného návštěvníka znovu, vyskočí jako
+nová — schválně: je to informace, že se na to lidi ptají opakovaně.
 
 ### Stav tabletů v dashboardu
 
@@ -1507,6 +1583,18 @@ automaticky, dokud ho někdo vědomě nepřidá do seznamu.
   [kapitola 10](#10-tep-tabletů-heartbeat)
 - `/data/displeje/...` (statické soubory) a SPA včetně `/tablet/:id`, hookem
   neprocházejí vůbec
+
+**Vyřešené dotazy na AI** (chráněné, vyžadují vybrané jméno — zapisuje se do
+auditu, kdo co odškrtl):
+
+| Metoda | Cesta | K čemu |
+|---|---|---|
+| GET | `/api/kb-dotazy/vyresene` | mapa `klíč → {cas, uzivatel, jmeno, otazka, druh}` |
+| POST | `/api/kb-dotazy/vyreseno` | tělo `{klic, otazka, druh}`, označí dotaz za vyřešený |
+| DELETE | `/api/kb-dotazy/vyresene/:klic` | vrátí označení zpět |
+
+Všechna tři vracejí **celou** mapu vyřešených, takže si prohlížeč nemusí stav
+skládat sám a nemůže se rozejít se souborem na disku.
 
 **Stačí přihlášení, jméno ještě vybrané být nemusí** (množina `BEZ_JMENA`):
 `GET|POST /api/jmena`, `DELETE /api/jmena/:jmeno`, `POST /api/session/jmeno`

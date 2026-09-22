@@ -249,6 +249,39 @@ async function nactiDen(soubor: SouborDne): Promise<NactenyDen> {
 // Soubory dnů v rozsahu (včetně krajů). Den se bere z názvu souboru a číslo
 // displeje z názvu podsložky, ne z obsahu. Prochází se obě struktury naráz:
 // podsložky <číslo>/ i staré ploché soubory přímo v unity/.
+// Nejstarší den, ze kterého máme log. Čtou se jen NÁZVY souborů, nic se
+// neotvírá — je to pár `readdir` i při roční historii, takže se to může
+// počítat při každém dotazu na přehled a nemusí se to nikam cachovat.
+export async function nejstarsiDenSDaty(): Promise<string | null> {
+  let polozky;
+  try {
+    polozky = await fs.readdir(UDALOSTI_DIR, { withFileTypes: true });
+  } catch {
+    return null; // tablety zatím nic neposlaly
+  }
+
+  let nejstarsi: string | null = null;
+  const zvaz = (nazev: string) => {
+    const m = DEN_RE.exec(nazev);
+    if (m === null) return;
+    if (nejstarsi === null || m[1] < nejstarsi) nejstarsi = m[1];
+  };
+
+  for (const polozka of polozky) {
+    if (polozka.isDirectory()) {
+      if (!SLOZKA_DISPLEJE_RE.test(polozka.name)) continue;
+      try {
+        for (const nazev of await fs.readdir(path.join(UDALOSTI_DIR, polozka.name))) zvaz(nazev);
+      } catch {
+        continue; // složka zmizela mezi výpisem a čtením
+      }
+      continue;
+    }
+    zvaz(polozka.name);
+  }
+  return nejstarsi;
+}
+
 export async function souboryVRozsahu(od: string, doDne: string): Promise<SouborDne[]> {
   let polozky;
   try {
@@ -341,6 +374,14 @@ export interface Prehled {
   od: string;
   do: string;
   maData: boolean;
+  // Od kdy do kdy každé období sahá, jako ISO čas. Počítá se TADY a ne
+  // v prohlížeči, aby se obě strany nemohly rozejít: čísla níž jsou sečtená
+  // přesně podle těchhle hranic a popisek nad nimi musí říkat totéž.
+  hranice: PodleObdobi<{ od: string; do: string }>;
+  // Nejstarší den, ze kterého máme log. Bere se z NÁZVŮ souborů, obsah se
+  // kvůli tomu nečte. `null` = zatím nedorazilo nic. Stránka díky tomu umí
+  // říct „data od …" místo aby prázdný graf vypadal jako výpadek.
+  prvniDenSDaty: string | null;
   celkem: PodleObdobi<{ relaci: number; udalosti: number }>;
   displeje: StavDispleje[];
   typySlidu: StavTypuSlidu[];
@@ -389,7 +430,12 @@ export async function prehled(opts: {
   const dny = Math.min(Math.max(Math.trunc(opts.dny ?? 30), 1), MAX_DNU_PREHLEDU);
   const ted = opts.ted ?? Date.now();
   const doDne = den(new Date(ted));
-  const od = den(new Date(ted - (dny - 1) * 86400000));
+  // Nejdelší období („měsíc") je POSUVNÉ okno `dny` × 24 h, ne `dny`
+  // kalendářních dnů. Soubory se proto musí číst od kalendářního dne, ve
+  // kterém okno začíná — jinak by při otevření večer chyběl skoro celý
+  // první den okna a číslo by bylo tiše podstřelené.
+  const oknoOd = ted - dny * 86400000;
+  const od = den(new Date(oknoOd));
 
   const soubory = await souboryVRozsahu(od, doDne);
   const udalosti: Udalost[] = [];
@@ -421,20 +467,34 @@ export async function prehled(opts: {
     }
   }
 
-  const hraniceDnes = new Date(ted);
-  hraniceDnes.setHours(0, 0, 0, 0);
-  const zacatekDnes = hraniceDnes.getTime();
-  const pred7 = ted - 7 * 86400000;
-  const pred30 = ted - 30 * 86400000;
+  // „Den" je POSLEDNÍCH 24 HODIN, ne od půlnoci. Od půlnoci to bylo v noci
+  // a brzo ráno všude nula, protože pavilon má zavřeno — číslo tedy neříkalo
+  // nic o provozu, jen kolik je hodin. Popisky proto musí mluvit
+  // o „posledních 24 hodinách", ne o „dnešku": okno přetéká do včerejška.
   const pred24h = ted - 86400000;
+  const pred7 = ted - 7 * 86400000;
+  // Hranice nejdelšího období se odvozuje z `dny`, ne z pevné třicítky:
+  // jinak by při jiném `dny` popisek říkal něco jiného, než co se sečetlo.
+  const predMesic = oknoOd;
 
   // Do kterých období událost nebo relace spadá. Jeden výpočet, ať se
   // hranice neopisují na pěti místech.
   const doObdobi = (casMs: number): Obdobi[] => {
+    // Přečetl se celý kalendářní den, ve kterém okno začíná, takže jeho
+    // dřívější část do žádného období nepatří. Bez téhle podmínky by
+    // „měsíc" tiše obsahoval až o den víc, než co říká popisek.
+    if (casMs < predMesic) return [];
     const kam: Obdobi[] = ["mesic"];
     if (casMs >= pred7) kam.push("tyden");
-    if (casMs >= zacatekDnes) kam.push("den");
+    if (casMs >= pred24h) kam.push("den");
     return kam;
+  };
+
+  const doIso = (ms: number) => new Date(ms).toISOString();
+  const hranice: PodleObdobi<{ od: string; do: string }> = {
+    den: { od: doIso(pred24h), do: doIso(ted) },
+    tyden: { od: doIso(pred7), do: doIso(ted) },
+    mesic: { od: doIso(predMesic), do: doIso(ted) },
   };
 
   interface StavSDobami extends StavDispleje {
@@ -548,6 +608,8 @@ export async function prehled(opts: {
     od,
     do: doDne,
     maData: udalosti.length > 0,
+    hranice,
+    prvniDenSDaty: await nejstarsiDenSDaty(),
     celkem,
     displeje,
     typySlidu,

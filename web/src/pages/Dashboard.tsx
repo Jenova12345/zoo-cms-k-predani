@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { api, formatDate, formatDateTime } from "../lib/api";
-import { canonicalizeLatin } from "../lib/latin";
+import { useToast } from "../components/Toast";
 import {
   NEPRIRAZENO,
   SLIDE_TYP_LABEL,
@@ -22,12 +22,12 @@ import type {
   Analytika,
   AnalyticsQuestion,
   AnalyticsQuestions,
-  AnalyticsSpecies,
   AnalyticsSummary,
   DisplaySummary,
   Obdobi,
   PrehledUdalosti,
   StavDispleje,
+  VyresenyDotaz,
 } from "../lib/types";
 
 // Data dashboardu jsou reálná: displeje z našeho /api/displays (meta.json na
@@ -77,11 +77,11 @@ const NA_STRANU = 8; // kolik dotazů na jednu stranu seznamu
 // kurátor by hledal, proč se jedna sekce nezměnila.
 //
 // Data z tabletů nesou všechna tři období naráz (viz server/src/udalosti.ts),
-// takže přepnutí u návštěv i heat mapy je okamžité, bez dotazu na server.
+// takže přepnutí u návštěv je okamžité, bez dotazu na server.
 // Analytika chatbota se dotazuje s `since`, proto se odpovědi drží v cache
 // podle období.
 
-type SekceObdobi = "navstevy" | "heatmapa" | "aiKpi" | "dotazy";
+type SekceObdobi = "navstevy" | "aiKpi" | "dotazy";
 
 const OBDOBI_PORADI: Obdobi[] = ["den", "tyden", "mesic"];
 
@@ -91,23 +91,23 @@ const OBDOBI_POPIS: Record<Obdobi, string> = {
   mesic: "Měsíc",
 };
 
-// Do věty pod čísly. Významy nejsou souměrné a je to záměr: tak to počítá
-// server odjakživa, tak to tu i říkáme nahlas.
+// Do věty pod čísly. Všechna tři jsou POSUVNÁ okna od teď zpátky, i „den":
+// od půlnoci bylo v noci a brzo ráno všude nula, protože pavilon má zavřeno,
+// a číslo pak neříkalo nic o provozu, jen kolik je hodin. Proto „posledních
+// 24 hodin", ne „dnes" — okno přetéká do včerejška a popisek to musí přiznat.
 const OBDOBI_VETA: Record<Obdobi, string> = {
-  den: "od dnešní půlnoci",
+  den: "posledních 24 hodin",
   tyden: "posledních 7 dní",
   mesic: "posledních 30 dní",
 };
 
-// Začátek období jako ISO čas pro `since` v analytice chatbota.
+const OBDOBI_HODIN: Record<Obdobi, number> = { den: 24, tyden: 7 * 24, mesic: 30 * 24 };
+
+// Začátek období jako ISO čas pro `since` v analytice chatbota. Musí odpovídat
+// hranicím, které počítá server pro data z tabletů (udalosti.ts), jinak by
+// vedle sebe stála čísla za různě dlouhá období.
 function zacatekObdobi(o: Obdobi): string {
-  const ted = Date.now();
-  if (o === "den") {
-    const d = new Date(ted);
-    d.setHours(0, 0, 0, 0);
-    return d.toISOString();
-  }
-  return new Date(ted - (o === "tyden" ? 7 : 30) * 86400000).toISOString();
+  return new Date(Date.now() - OBDOBI_HODIN[o] * 3600000).toISOString();
 }
 
 function PrepinacObdobi({
@@ -225,12 +225,6 @@ function cisloCs(n: number): string {
   return n.toLocaleString("cs-CZ");
 }
 
-function pocetDotazu(n: number): string {
-  if (n === 1) return "1 dotaz";
-  if (n >= 2 && n <= 4) return `${n} dotazy`;
-  return `${cisloCs(n)} dotazů`;
-}
-
 function druhLabel(q: { species_name: string; species_latin: string }): string {
   return q.species_name || q.species_latin || "neurčený druh";
 }
@@ -264,213 +258,14 @@ function typSlidoLabel(t: { typ: string; znamy: boolean }): string {
   return SLIDE_TYP_LABEL[t.typ as SlideTyp] ?? t.typ;
 }
 
-// --- Heat mapa nad reálným půdorysem pavilonu ---
-
-interface HeatNode {
-  id: string;
-  n: number; // číslo displeje
-  popis: string; // druh z našich meta.json (záloha: druh z analytiky)
-  x: number; // % šířky půdorysu
-  y: number; // % výšky půdorysu
-  count: number; // dotazů za sledované období
-  score: number; // 0 až 1, intenzita pro barvu a velikost
-}
-
-// Oficiální půdorys pavilonu od ZOO, verze S ČÍSLY DISPLEJŮ (17. 8. 2026).
-// Kopie podklady/Amphibiarium_mapa 1.png, servíruje se z web/public. Poměr
-// stran drží mapu ve správném tvaru při jakékoli šířce okna.
-const PUDORYS = "/pavilon-pudorys.png";
-const PUDORYS_POMER = "6459 / 6434";
-
-// ┌─ POZICE DISPLEJŮ NA PŮDORYSU ────────────────────────────────────────────┐
-// │ Tady se souřadnice ladí. x a y jsou procenta šířky a výšky obrázku       │
-// │ (levý horní roh = 0, 0), takže se body škálují s velikostí mapy.         │
-// │ Bod displeje N leží na obdélníčku s číslem N.                            │
-// └─────────────────────────────────────────────────────────────────────────┘
-//
-// Jak souřadnice vznikly: v plánku je u každé vitríny natištěné číslo displeje
-// (1 až 31). Středy obdélníčků jsou odečtené z obrázku detekcí barevných ploch
-// (spojité komponenty jedné barvy) a k nim přiřazená čísla přečtená z plánku.
-// Kolečka s čísly 1 až 11 jsou sekce (skupiny displejů), ty tu nejsou. Bez čísla
-// jsou na plánku i tři tvary, které tedy displeje nejsou: kruhová nádrž
-// u sekce 1, zelený pruh u stěny a prostřední fialový box u sekce 8.
-// Komentáře u skupin uvádějí barvu a číslo sekce z plánku, jen pro orientaci.
-const PUDORYS_BODY: { displej: number; x: number; y: number }[] = [
-  // tyrkysová, sekce 1
-  { displej: 1, x: 17.4, y: 58.0 },
-  // lososová, sekce 2
-  { displej: 2, x: 27.2, y: 66.6 },
-  { displej: 3, x: 29.5, y: 70.4 },
-  { displej: 4, x: 33.1, y: 73.4 },
-  { displej: 5, x: 37.3, y: 77.0 },
-  { displej: 6, x: 42.0, y: 79.1 },
-  { displej: 7, x: 47.7, y: 79.1 },
-  // žlutá, sekce 3
-  { displej: 8, x: 13.5, y: 77.7 },
-  { displej: 9, x: 17.6, y: 81.6 },
-  { displej: 10, x: 21.8, y: 85.1 },
-  { displej: 11, x: 25.7, y: 88.4 },
-  // malinová, sekce 4
-  { displej: 12, x: 29.4, y: 93.0 },
-  { displej: 13, x: 43.7, y: 95.6 },
-  { displej: 14, x: 51.2, y: 93.8 },
-  // oranžová, sekce 7
-  { displej: 15, x: 73.5, y: 67.3 },
-  { displej: 16, x: 77.2, y: 63.7 },
-  { displej: 17, x: 79.0, y: 59.3 },
-  { displej: 18, x: 78.9, y: 54.3 },
-  // fialová, sekce 8 (prostřední box strip nemá číslo, displej to není)
-  { displej: 19, x: 94.7, y: 46.7 },
-  { displej: 20, x: 94.8, y: 35.6 },
-  // modrá, sekce 9, vnější stěna severovýchodní chodby
-  { displej: 21, x: 92.8, y: 27.8 },
-  { displej: 22, x: 88.9, y: 24.1 },
-  { displej: 23, x: 83.5, y: 18.7 },
-  // modrá, sekce 9, vnitřní stěna téže chodby
-  { displej: 24, x: 79.4, y: 33.5 },
-  { displej: 25, x: 75.7, y: 29.9 },
-  { displej: 26, x: 72.2, y: 26.5 },
-  // hnědá, sekce 10
-  { displej: 27, x: 71.0, y: 6.2 },
-  { displej: 28, x: 65.2, y: 4.1 },
-  { displej: 29, x: 58.5, y: 4.2 },
-  { displej: 30, x: 58.9, y: 17.9 },
-  // zelená, sekce 11
-  { displej: 31, x: 50.9, y: 17.9 },
-];
-
-// Nízká návštěvnost zelená → vysoká červená. Stejné zastávky má i legenda
-// pod mapou (HEAT_GRADIENT), ať se barvy nerozejdou.
-function heatColor(score: number): string {
-  const stops: [number, [number, number, number]][] = [
-    [0.0, [134, 196, 138]], // světle zelená
-    [0.35, [21, 128, 61]], // zelená
-    [0.7, [194, 116, 12]], // oranžová
-    [1.0, [220, 38, 38]], // červená
-  ];
-  for (let i = 0; i < stops.length - 1; i++) {
-    const [s0, c0] = stops[i];
-    const [s1, c1] = stops[i + 1];
-    if (score <= s1) {
-      const t = (score - s0) / (s1 - s0);
-      const c = c0.map((v, k) => Math.round(v + (c1[k] - v) * t));
-      return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-    }
-  }
-  return "rgb(220, 38, 38)";
-}
-
-const HEAT_GRADIENT = "linear-gradient(90deg, #86C48A, #15803D 35%, #C2740C 70%, #DC2626)";
-
-// Bez analytiky se body kreslí neutrálně šedě, heat mapa bez dat nemá co barvit.
-const NEUTRAL = "#A3ADAA";
-
-interface MapaData {
-  nodes: HeatNode[];
-  maxNode: HeatNode | null; // displej s nejvíc dotazy
-  nenaparovano: AnalyticsSpecies[]; // druhy z analytiky bez displeje u nás
-  mimoPudorys: number[]; // displeje z CMS, které na plánku nejsou
-  chybiVCms: number[]; // displeje z plánku, které v CMS nejsou
-}
-
-// Párování analytiky na displeje: primárně přes species_latin proti latin_name
-// z našich meta.json (obojí kanonizované stejnými pravidly), display_id jen
-// jako záloha, podle kontraktu může být null.
-function naparuj(
-  displays: DisplaySummary[],
-  summary: AnalyticsSummary | null,
-  navstevy: Map<number, number> | null,
-): MapaData {
-  const podleCisla = new Map(displays.map((d) => [Number(d.id), d]));
-
-  const podleLatiny = new Map<string, { count: number; species_name: string }>();
-  const podleId = new Map<number, { count: number; species_name: string }>();
-  for (const s of summary?.per_species ?? []) {
-    const latin = canonicalizeLatin(s.species_latin);
-    if (latin) {
-      const drive = podleLatiny.get(latin);
-      podleLatiny.set(latin, {
-        count: (drive?.count ?? 0) + s.count,
-        species_name: s.species_name || drive?.species_name || "",
-      });
-    }
-    if (s.display_id !== null) {
-      const drive = podleId.get(s.display_id);
-      podleId.set(s.display_id, {
-        count: (drive?.count ?? 0) + s.count,
-        species_name: s.species_name || drive?.species_name || "",
-      });
-    }
-  }
-
-  const pouziteLatiny = new Set<string>();
-  const pouziteId = new Set<number>();
-
-  // Párování se počítá pro VŠECHNY displeje z CMS, i pro ty mimo půdorys,
-  // jinak by druh napárovaný na displej 35 hlásil, že nemá displej.
-  const zasahy = new Map<number, { count: number; species_name: string } | undefined>();
-  for (const d of displays) {
-    const latin = canonicalizeLatin(d.latin_name ?? "");
-    const podleJmena = latin ? podleLatiny.get(latin) : undefined;
-    const zaloha = podleJmena ? undefined : podleId.get(Number(d.id));
-    if (podleJmena) pouziteLatiny.add(latin);
-    if (zaloha) pouziteId.add(Number(d.id));
-    zasahy.set(Number(d.id), podleJmena ?? zaloha);
-  }
-
-  // Body kreslíme podle půdorysu; displej, který v CMS není, se vynechá.
-  const bezScore = PUDORYS_BODY.flatMap((bod) => {
-    const d = podleCisla.get(bod.displej);
-    if (!d) return [];
-    const zasah = zasahy.get(bod.displej);
-    // Druh bere přednostně z našich meta.json, jméno z analytiky je záloha.
-    const cmsDruh = d.druh === NEPRIRAZENO ? "" : d.druh;
-    return [
-      {
-        id: d.id,
-        n: bod.displej,
-        popis: cmsDruh || zasah?.species_name || NEPRIRAZENO,
-        x: bod.x,
-        y: bod.y,
-        // Když z tabletů chodí návštěvy, barví mapu ony: je to přímé měření
-        // toho, kde se lidi zastavili. Dotazy na chatbota jsou záloha.
-        count: navstevy ? (navstevy.get(bod.displej) ?? 0) : (zasah?.count ?? 0),
-      },
-    ];
-  });
-
-  const max = bezScore.reduce((a, b) => Math.max(a, b.count), 0);
-  const nodes: HeatNode[] = bezScore.map((n) => ({
-    ...n,
-    score: max > 0 && n.count > 0 ? Math.max(0.08, n.count / max) : 0,
-  }));
-
-  const nenaparovano = (summary?.per_species ?? []).filter((s) => {
-    const latin = canonicalizeLatin(s.species_latin);
-    if (latin && pouziteLatiny.has(latin)) return false;
-    if (s.display_id !== null && pouziteId.has(s.display_id)) return false;
-    return true;
-  });
-
-  const naPudorysu = new Set(PUDORYS_BODY.map((b) => b.displej));
-
-  return {
-    nodes,
-    maxNode: max > 0 ? nodes.reduce((a, b) => (b.count > a.count ? b : a), nodes[0]) : null,
-    nenaparovano,
-    mimoPudorys: displays.map((d) => Number(d.id)).filter((n) => !naPudorysu.has(n)),
-    chybiVCms: PUDORYS_BODY.filter((b) => !podleCisla.has(b.displej)).map((b) => b.displej),
-  };
-}
-
 type CacheObdobi<T> = Partial<Record<Obdobi, Analytika<T>>>;
 
 export default function Dashboard() {
+  const toast = useToast();
   const [displays, setDisplays] = useState<DisplaySummary[] | null>(null);
   const [chybaDispleju, setChybaDispleju] = useState<string | null>(null);
   const [udalosti, setUdalosti] = useState<Analytika<PrehledUdalosti> | null>(null);
   const [nacitani, setNacitani] = useState(true);
-  const [hover, setHover] = useState<HeatNode | null>(null);
 
   // --- Období: globální + vlastní u jednotlivých sekcí ---
   const [globalniObdobi, setGlobalniObdobi] = useState<Obdobi>("den");
@@ -502,7 +297,6 @@ export default function Dashboard() {
 
   const obdobiKpi = obdobiSekce("aiKpi");
   const obdobiDotazy = obdobiSekce("dotazy");
-  const obdobiHeat = obdobiSekce("heatmapa");
   const obdobiNavstevy = obdobiSekce("navstevy");
 
   // Displeje a události z tabletů. Události stačí stáhnout jednou pro celé
@@ -546,16 +340,14 @@ export default function Dashboard() {
         .finally(() => bezi.current.delete(klic));
     };
 
-    // Souhrn potřebují KPI karty i heat mapa (ta jím barví, když nejsou
-    // návštěvy z tabletů).
-    for (const o of new Set([obdobiKpi, obdobiHeat])) {
-      zajisti<AnalyticsSummary>(
-        `summary:${o}`,
-        summaryCache[o] !== undefined,
-        () => api.analyticsSummary(zacatekObdobi(o)),
-        (d) => setSummaryCache((p) => ({ ...p, [o]: d })),
-      );
-    }
+    // Souhrn potřebují KPI karty. (Heat mapa se přestěhovala do Analytiky:
+    // přehled má ukazovat aktuální stav, mapa je pohled na delší období.)
+    zajisti<AnalyticsSummary>(
+      `summary:${obdobiKpi}`,
+      summaryCache[obdobiKpi] !== undefined,
+      () => api.analyticsSummary(zacatekObdobi(obdobiKpi)),
+      (d) => setSummaryCache((p) => ({ ...p, [obdobiKpi]: d })),
+    );
     zajisti<AnalyticsQuestions>(
       `posledni:${obdobiDotazy}`,
       posledniCache[obdobiDotazy] !== undefined,
@@ -573,10 +365,9 @@ export default function Dashboard() {
         }),
       (d) => setNezvladnuteCache((p) => ({ ...p, [obdobiDotazy]: d })),
     );
-  }, [obdobiKpi, obdobiHeat, obdobiDotazy, summaryCache, posledniCache, nezvladnuteCache]);
+  }, [obdobiKpi, obdobiDotazy, summaryCache, posledniCache, nezvladnuteCache]);
 
   const summary = summaryCache[obdobiKpi] ?? null;
-  const summaryHeat = summaryCache[obdobiHeat] ?? null;
   const posledni = posledniCache[obdobiDotazy] ?? null;
   const nezvladnute = nezvladnuteCache[obdobiDotazy] ?? null;
 
@@ -594,7 +385,6 @@ export default function Dashboard() {
   }, []);
 
   const udalostiData = udalosti?.dostupne ? udalosti.data : null;
-  const maUdalosti = !!udalostiData?.maData;
 
   // Kolik tabletů je v jakém stavu. Počítá se ze stejného seznamu, jaký
   // kreslí proužek, takže se čísla a barvy nemůžou rozejít.
@@ -604,19 +394,6 @@ export default function Dashboard() {
     for (const d of displays) soucet[d.stav]++;
     return soucet;
   }, [displays]);
-
-  // Návštěvy z tabletů barví heat mapu, když nějaké jsou. Bere se období
-  // zvolené u mapy, ne u zbytku přehledu.
-  const navstevyProMapu = useMemo(() => {
-    if (!maUdalosti || !udalostiData) return null;
-    return new Map(udalostiData.displeje.map((d) => [d.displej, d.navstevy[obdobiHeat]]));
-  }, [maUdalosti, udalostiData, obdobiHeat]);
-
-  const summaryHeatData = summaryHeat?.dostupne ? summaryHeat.data : null;
-  const mapa = useMemo(
-    () => naparuj(displays ?? [], summaryHeatData, navstevyProMapu),
-    [displays, summaryHeatData, navstevyProMapu],
-  );
 
   // Tiché displeje: nejdůležitější věc na dashboardu, znamená spadlý tablet.
   // Ticho je vždycky za 24 h, s přepínačem období nesouvisí.
@@ -677,6 +454,36 @@ export default function Dashboard() {
     return poskozeneRadky > 0 && poskozeneRadky > (dobre + poskozeneRadky) * 0.01;
   }, [udalostiData]);
 
+  // --- Vyřešené dotazy ---
+  // Seznam dotazů drží Danielův backend a je jen ke čtení, poznámka „doplněno
+  // do KB" leží u nás. Klíč počítá server, prohlížeč ho jen posílá zpátky.
+  // Po každé změně se bere CELÁ mapa z odpovědi, takže se lokální stav
+  // nemůže rozejít se souborem na disku.
+  const [vyresene, setVyresene] = useState<Record<string, VyresenyDotaz>>({});
+  const [zobrazitVyresene, setZobrazitVyresene] = useState(false);
+  const [resiSe, setResiSe] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.vyreseneDotazy().then(setVyresene, () => {
+      // Když se seznam nenačte, tlačítka dál fungují — jen se nic nejeví
+      // jako vyřešené. Lepší než celý sloupec zabít chybovou hláškou.
+    });
+  }, []);
+
+  async function prepniVyreseny(q: AnalyticsQuestion) {
+    setResiSe(q.klic);
+    try {
+      const nove = vyresene[q.klic]
+        ? await api.zrusDotazVyreseny(q.klic)
+        : await api.oznacDotazVyreseny(q.klic, { otazka: q.user_message, druh: druhLabel(q) });
+      setVyresene(nove);
+    } catch {
+      toast.error("Změnu se nepodařilo uložit.");
+    } finally {
+      setResiSe(null);
+    }
+  }
+
   // --- Seznamy dotazů: pevná výška, listuje se ---
   const [stranaPosledni, setStranaPosledni] = useState(0);
   const [stranaNezvladnute, setStranaNezvladnute] = useState(0);
@@ -685,10 +492,21 @@ export default function Dashboard() {
     () => (posledni?.dostupne ? serazeneDotazy(posledni.data.questions) : []),
     [posledni],
   );
-  const nezvladnuteSerazene = useMemo(
-    () => (nezvladnute?.dostupne ? serazeneDotazy(nezvladnute.data.questions) : []),
-    [nezvladnute],
-  );
+  // Vyřešené se ze seznamu schovají, dokud si je kurátor nevyžádá. Filtruje
+  // se až tady, ne při stahování: backend o našem označení neví.
+  const nezvladnuteSerazene = useMemo(() => {
+    if (!nezvladnute?.dostupne) return [];
+    const vse = serazeneDotazy(nezvladnute.data.questions);
+    return zobrazitVyresene ? vse : vse.filter((q) => !vyresene[q.klic]);
+  }, [nezvladnute, vyresene, zobrazitVyresene]);
+
+  // Kolik z právě stažených dotazů je označených. Počítá se z TÉHOŽ seznamu,
+  // jaký se vypisuje, ne z celé mapy vyřešených — ta obsahuje i dotazy
+  // z jiných období a číslo u tlačítka by pak nesedělo na to, co je vidět.
+  const vyresenychVeVypisu = useMemo(() => {
+    if (!nezvladnute?.dostupne) return 0;
+    return nezvladnute.data.questions.filter((q) => vyresene[q.klic]).length;
+  }, [nezvladnute, vyresene]);
 
   const stranPosledni = Math.max(1, Math.ceil(posledniSerazene.length / NA_STRANU));
   const stranNezvladnute = Math.max(1, Math.ceil(nezvladnuteSerazene.length / NA_STRANU));
@@ -832,9 +650,25 @@ export default function Dashboard() {
                 dřív se tu potkávalo 30denní okno s 24h oknem u AI a nedalo se
                 poznat, co je za co. */}
             <div>
-              <div className="mb-2 text-xs font-semibold text-fg">
-                {OBDOBI_POPIS[globalniObdobi]}
-                <span className="font-normal text-fg-muted"> · {OBDOBI_VETA[globalniObdobi]}</span>
+              <div className="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs font-semibold text-fg">
+                <span>
+                  {OBDOBI_POPIS[globalniObdobi]}
+                  <span className="font-normal text-fg-muted"> · {OBDOBI_VETA[globalniObdobi]}</span>
+                </span>
+                {/* Konkrétní rozsah, ne jen „posledních 30 dní": u posuvného
+                    okna je rozdíl mezi „30 dní" a „od 24. 8. 14:30" zásadní,
+                    když se čísla porovnávají s něčím jiným. */}
+                <span className="font-normal text-fg-dim tnum">
+                  {formatDateTime(udalostiData.hranice[globalniObdobi].od)} –{" "}
+                  {formatDateTime(udalostiData.hranice[globalniObdobi].do)}
+                </span>
+                {/* Kam až historie sahá. Bez toho vypadá prázdný graf za starší
+                    období jako výpadek, i když jsme tehdy prostě neměřili. */}
+                {udalostiData.prvniDenSDaty && (
+                  <span className="font-normal text-fg-dim">
+                    · data od <span className="tnum">{formatDate(udalostiData.prvniDenSDaty)}</span>
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-2 divide-x divide-line border-y border-line sm:grid-cols-4">
                 {[
@@ -1068,193 +902,6 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Mapa dotazů: hero na ploše, bez rámečku */}
-      <section className="space-y-5">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="kicker">
-              {navstevyProMapu ? "Kde se lidi zastavují" : "Mapa dotazů na AI"}
-            </div>
-            <h2 className="font-display text-lg font-semibold text-fg mt-1.5">
-              Půdorys pavilonu
-            </h2>
-            {/* Mapa barví buď návštěvy z tabletů, nebo (když nejsou) dotazy na
-                AI. S přepínačem období musí být vidět, co se zrovna barví. */}
-            <div className="mt-1 text-[11px] text-fg-dim">
-              Barví: {navstevyProMapu ? "návštěvy z tabletů" : "dotazy na AI"} ·{" "}
-              {OBDOBI_VETA[obdobiHeat]}
-            </div>
-          </div>
-          <PrepinacObdobi
-            hodnota={obdobiHeat}
-            onZmena={(o) => nastavSekci("heatmapa", o)}
-            maly
-            vlastni={vlastniObdobi.heatmapa !== undefined}
-            onReset={() => nastavSekci("heatmapa", globalniObdobi)}
-          />
-          {mapa.maxNode && (
-            <div className="text-right">
-              <div className="font-display text-xl font-bold text-fg tnum leading-none">
-                {cisloCs(mapa.maxNode.count)}
-              </div>
-              <div className="text-[11px] text-fg-dim mt-1">
-                špička · displej {mapa.maxNode.n}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {chybaDispleju && <Hlaska text="Seznam displejů se nepodařilo načíst." detail={chybaDispleju} />}
-
-        {displays && displays.length === 0 && (
-          <Hlaska
-            text="V CMS zatím nejsou žádné displeje."
-            detail="Datová složka je prázdná, displeje vytvoří `npm run seed`."
-          />
-        )}
-
-        {displays && displays.length > 0 && (
-          <>
-            {/* Půdorys drží poměr stran, body jsou umístěné v procentech, takže
-                se mapa i body škálují se šířkou okna. */}
-            <div
-              className="relative mx-auto w-full max-w-[760px]"
-              style={{ aspectRatio: PUDORYS_POMER }}
-              onMouseLeave={() => setHover(null)}
-            >
-              {/* Plánek je jen tichý obrys: odbarvený a ztlumený, ať barevné
-                  zóny nepřebíjejí body návštěvnosti. */}
-              <img
-                src={PUDORYS}
-                alt="Půdorys pavilonu Amphibiárium"
-                draggable={false}
-                className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain"
-                style={{ filter: "grayscale(1)", opacity: 0.35 }}
-              />
-
-              {mapa.nodes.map((node) => {
-                const zvyraznit = summaryData !== null && node.count > 0;
-                const color = zvyraznit ? heatColor(node.score) : NEUTRAL;
-                const active = hover?.id === node.id;
-                // Velikost v procentech mapy, ať bod zůstane v poměru k plánku.
-                const velikost = 2.2 + node.score * 2.8;
-                return (
-                  <button
-                    key={node.id}
-                    onMouseEnter={() => setHover(node)}
-                    className="absolute rounded-full border-2 border-white transition-transform"
-                    style={{
-                      left: `${node.x}%`,
-                      top: `${node.y}%`,
-                      width: `${velikost}%`,
-                      height: `${velikost}%`,
-                      background: color,
-                      boxShadow: [
-                        "0 1px 3px rgba(16,40,34,0.3)",
-                        active ? "0 0 0 3px rgba(15,118,110,0.55)" : "",
-                        zvyraznit ? `0 0 ${8 + node.score * 18}px ${node.score * 4}px ${color}55` : "",
-                      ]
-                        .filter(Boolean)
-                        .join(", "),
-                      transform: `translate(-50%, -50%) scale(${active ? 1.2 : 1})`,
-                      zIndex: active ? 20 : 1,
-                    }}
-                    aria-label={
-                      summaryData
-                        ? `Displej ${node.n}, ${node.popis}, ${pocetDotazu(node.count)}`
-                        : `Displej ${node.n}, ${node.popis}`
-                    }
-                  />
-                );
-              })}
-
-              {hover && (
-                <div
-                  className="absolute z-30 pointer-events-none rounded-lg border border-line bg-surface px-3 py-2 shadow-cardHover"
-                  style={{
-                    left: `${hover.x}%`,
-                    top: `${hover.y}%`,
-                    maxWidth: 220,
-                    // U kraje mapy se bublina zarovná dovnitř, ať nevylézá z plochy.
-                    transform: `translate(${
-                      hover.x > 78 ? "-88%" : hover.x < 22 ? "-12%" : "-50%"
-                    }, ${hover.y < 18 ? "18px" : "calc(-100% - 18px)"})`,
-                  }}
-                >
-                  <div className="font-display text-sm font-semibold text-fg tnum">
-                    Displej {hover.n}
-                  </div>
-                  <div className="text-[11px] text-fg-muted">{hover.popis}</div>
-                  {(summaryHeatData || navstevyProMapu) && (
-                    <div className="text-[11px] text-fg-muted tnum">
-                      {navstevyProMapu ? `${cisloCs(hover.count)}× návštěva` : pocetDotazu(hover.count)}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Legenda a poznámky zarovnané pod mapu */}
-            <div className="mx-auto w-full max-w-[760px] space-y-2.5">
-            {summaryHeatData || navstevyProMapu ? (
-              <>
-                <div className="flex items-center gap-3 text-[11px] text-fg-dim max-w-md">
-                  <span>Méně</span>
-                  <div className="h-1.5 flex-1 rounded-full" style={{ background: HEAT_GRADIENT }} />
-                  <span>Více</span>
-                </div>
-                {mapa.nenaparovano.length > 0 && (
-                  <p className="text-[11px] text-fg-dim">
-                    {mapa.nenaparovano.length}{" "}
-                    {mapa.nenaparovano.length === 1 ? "druh z analytiky" : "druhů z analytiky"} se
-                    nepodařilo napárovat na displej (
-                    {mapa.nenaparovano
-                      .slice(0, 3)
-                      .map((s) => s.species_latin || s.species_name || "?")
-                      .join(", ")}
-                    {mapa.nenaparovano.length > 3 ? ", …" : ""}). Zkontrolujte latinský název v
-                    info panelu displeje.
-                  </p>
-                )}
-              </>
-            ) : !summaryHeat ? (
-              <Cekam />
-            ) : (
-              <Hlaska
-                text={NEPRIPOJENO}
-                detail="Body ukazují displeje na půdorysu, intenzita se dokreslí, až začnou chodit návštěvy z tabletů nebo dotazy na chatbota."
-              />
-            )}
-
-            {/* Kolečka na plánku jsou zóny expozice, ať si je nikdo neplete
-                s čísly displejů. */}
-            <p className="text-[11px] text-fg-dim">
-              Body leží na obdélníčcích s čísly displejů z plánku od ZOO (číslo, druh a počet
-              dotazů ukáže nájezd myší). Kolečka s čísly 1 až 11 na plánku jsou sekce, tedy skupiny
-              displejů; ty v mapě body nemají.
-            </p>
-
-            {/* Plánek od ZOO zachycuje 31 displejů, v CMS jich může být víc. */}
-            {mapa.mimoPudorys.length > 0 && (
-              <p className="text-[11px] text-fg-dim">
-                Půdorys od ZOO zachycuje displeje 1 až {PUDORYS_BODY.length}. V CMS jsou navíc displeje{" "}
-                <span className="tnum">{mapa.mimoPudorys.join(", ")}</span>, na plánku nejsou, v
-                mapě se proto nezobrazují.
-              </p>
-            )}
-            {mapa.chybiVCms.length > 0 && (
-              <p className="text-[11px] text-fg-dim">
-                Displeje <span className="tnum">{mapa.chybiVCms.join(", ")}</span> jsou na půdorysu,
-                ale v CMS chybí.
-              </p>
-            )}
-            </div>
-          </>
-        )}
-      </section>
-
-      <Divider />
-
       {/* Dvousloupcový editorial spread: poslední dotazy | co AI nezvládla.
           Oba sloupce mají pevnou výšku a listuje se v nich, jinak se přehled
           natáhne přes celou obrazovku. Období řídí jeden přepínač pro obě
@@ -1314,12 +961,27 @@ export default function Dashboard() {
           </section>
 
           <section className="lg:border-l lg:border-line lg:pl-10">
-            <div className="flex items-baseline justify-between gap-3 mb-5">
+            <div className="flex items-baseline justify-between gap-3 mb-2">
               <div className="kicker">Co AI nezvládla</div>
               {nezvladnute?.dostupne && nezvladnute.data.total > 0 && (
                 <span className="text-[11px] text-fg-dim tnum">
                   {cisloCs(nezvladnuteSerazene.length)} z {cisloCs(nezvladnute.data.total)}
                 </span>
+              )}
+            </div>
+            {/* Vyřešené se schovávají, ale musí jít zobrazit: jinak by nešlo
+                poznat, jestli je seznam prázdný proto, že je hotovo, nebo
+                proto, že dotazy nechodí. */}
+            <div className="mb-4 min-h-[20px] text-[11px]">
+              {vyresenychVeVypisu > 0 && (
+                <button
+                  onClick={() => setZobrazitVyresene((v) => !v)}
+                  className="font-semibold text-accent hover:underline"
+                >
+                  {zobrazitVyresene
+                    ? "Skrýt vyřešené"
+                    : `Zobrazit vyřešené (${cisloCs(vyresenychVeVypisu)})`}
+                </button>
               )}
             </div>
             {!nezvladnute && <Cekam />}
@@ -1333,17 +995,47 @@ export default function Dashboard() {
             {nezvladnute?.dostupne && nezvladnute.data.questions.length > 0 && (
               <>
                 <ul className="min-h-[420px] divide-y divide-lineSoft">
-                  {nezvladnuteStrana.map((q, i) => (
-                    <li key={`${q.session_id}-${q.timestamp}-${i}`} className="py-3">
-                      <div className="text-sm text-fg">{q.user_message}</div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
-                        <span className="h-1.5 w-1.5 rounded-full bg-amber" />
-                        <span>{druhLabel(q)}</span>
-                        <span>·</span>
-                        <span className="tnum">{formatDateTime(q.timestamp)}</span>
-                      </div>
-                    </li>
-                  ))}
+                  {nezvladnuteStrana.map((q, i) => {
+                    const hotovo = vyresene[q.klic];
+                    return (
+                      <li key={`${q.session_id}-${q.timestamp}-${i}`} className="py-3">
+                        <div className={`text-sm ${hotovo ? "text-fg-dim line-through" : "text-fg"}`}>
+                          {q.user_message}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full ${hotovo ? "bg-accent" : "bg-amber"}`}
+                          />
+                          <span>{druhLabel(q)}</span>
+                          <span>·</span>
+                          <span className="tnum">{formatDateTime(q.timestamp)}</span>
+                        </div>
+                        {hotovo ? (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-fg-dim">
+                            <span>
+                              Vyřešeno {hotovo.jmeno || hotovo.uzivatel} ·{" "}
+                              <span className="tnum">{formatDateTime(hotovo.cas)}</span>
+                            </span>
+                            <button
+                              onClick={() => void prepniVyreseny(q)}
+                              disabled={resiSe === q.klic}
+                              className="font-semibold text-fg-muted hover:text-fg hover:underline disabled:opacity-50"
+                            >
+                              vrátit zpět
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => void prepniVyreseny(q)}
+                            disabled={resiSe === q.klic}
+                            className="mt-1.5 rounded-md border border-line px-2 py-1 text-[11px] font-semibold text-fg-muted hover:border-accent hover:text-accent disabled:opacity-50"
+                          >
+                            {resiSe === q.klic ? "Ukládám…" : "Vyřešeno / doplněno do KB"}
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
                 <Strankovani
                   strana={stranaNezvladnute}

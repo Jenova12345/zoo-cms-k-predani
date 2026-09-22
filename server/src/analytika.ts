@@ -2,7 +2,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ANALYTIKA_DIR, UDALOSTI_DIR } from "./paths.js";
 import { writeFileAtomic } from "./atomic.js";
-import { type SouborDne, den, parsujRadek, souboryVRozsahu } from "./udalosti.js";
+import {
+  type SouborDne,
+  den,
+  nejstarsiDenSDaty,
+  parsujRadek,
+  souboryVRozsahu,
+} from "./udalosti.js";
 
 // Analytika návštěvnosti z událostí Unity. Na rozdíl od dashboardu, který
 // kouká na posledních pár dnů, se tady běžně ptáme na rok zpátky — a to je
@@ -37,6 +43,15 @@ export interface DenniSouhrn {
   otevreniChatu: number;
   // Doby se drží jako SOUČET a POČET, ne jako průměr. Průměrovat denní
   // průměry by dalo tichému čtvrtku stejnou váhu jako narvané sobotě.
+  // Kdy se relace začaly, po hodinách místního času (24 čísel, index = hodina).
+  // Den zná svůj kalendářní den, takže se z toho v součtu poskládá mřížka
+  // den v týdnu × hodina, aniž by se kvůli tomu musely znovu číst logy.
+  poHodinach: number[];
+  // Kolik slidů si návštěvník za relaci prošel, rozdělené do košů (viz
+  // KOSE_SLIDU). Průměr by šel dopočítat i ze zobrazeni/relaci, ale ten
+  // neřekne, jestli je to „každý si projde tři" nebo „většina jeden
+  // a hrstka dvacet".
+  slidyNaRelaci: Record<string, number>;
   soucetTrvaniS: number;
   pocetTrvani: number;
   trvaniTypu: Record<string, { soucet: number; pocet: number }>;
@@ -51,12 +66,26 @@ export interface DenniSouhrn {
 // Stejná tolerance jako v udalosti.ts, ať se obě čísla chovají stejně.
 const TOLERANCE_S = 60;
 
+// Koše pro „kolik slidů projde návštěvník za relaci". Klíč se ukládá do
+// souhrnů na disk, takže se jeho znění nesmí měnit od boku — přejmenování
+// koše znamená zvýšit VERZE_CACHE.
+export const KOSE_SLIDU = ["1", "2", "3", "4-5", "6-10", "11+"] as const;
+
+function kosSlidu(pocet: number): string {
+  if (pocet <= 3) return String(pocet);
+  if (pocet <= 5) return "4-5";
+  if (pocet <= 10) return "6-10";
+  return "11+";
+}
+
 function prazdny(denStr: string, displej: number): DenniSouhrn {
   return {
     den: denStr,
     displej,
     relaci: 0,
     zobrazeni: {},
+    poHodinach: new Array(24).fill(0),
+    slidyNaRelaci: {},
     otevreniChatu: 0,
     soucetTrvaniS: 0,
     pocetTrvani: 0,
@@ -107,6 +136,9 @@ function souhrnSouboru(obsah: string, soubor: SouborDne): DenniSouhrn {
 
     if (u.akce === "relace_start") {
       s.relaci++;
+      // Hodina MÍSTNÍHO času: mřížka má odpovídat otevírací době pavilonu,
+      // ne UTC. Server běží ve stejné zóně jako zoo.
+      s.poHodinach[new Date(u.casMs).getHours()]++;
       continue;
     }
     if (u.akce === "otevren_chat") {
@@ -147,6 +179,18 @@ function souhrnSouboru(obsah: string, soubor: SouborDne): DenniSouhrn {
     t.pocet++;
   }
 
+  // Slidy na relaci. Počítají se jen relace, které v tomhle dni ZAČALY —
+  // u relace přeteklé z včerejška bychom viděli jen její ocas a vyšlo by
+  // falešně nízké číslo. Relace bez jediného slidu do statistiky nepatří:
+  // to je člověk, který kolem jen prošel a tablet se probudil.
+  const slidyVRelaci = new Map<string, number>();
+  for (const z of zobrazeni) slidyVRelaci.set(z.relace, (slidyVRelaci.get(z.relace) ?? 0) + 1);
+  for (const [klic, pocet] of slidyVRelaci) {
+    if (!relace.get(klic)?.maStart) continue;
+    const kos = kosSlidu(pocet);
+    s.slidyNaRelaci[kos] = (s.slidyNaRelaci[kos] ?? 0) + 1;
+  }
+
   s.neznameTypy = [...nezname].sort();
   return s;
 }
@@ -171,7 +215,9 @@ interface MesicCache {
 //   1 → 2  parser přestal zahazovat řádky s nečíselným polem `displej`
 //          (`"Kiosek_5"` i neuvozovkované `Kiosek_5`, viz udalosti.ts).
 //          Souhrny se po nasazení jednou přepočítají z logů, ~6 s na rok.
-const VERZE_CACHE = 2;
+//   2 → 3  souhrn navíc drží `poHodinach` (kdy relace začaly) a
+//          `slidyNaRelaci` (histogram délky návštěvy).
+const VERZE_CACHE = 3;
 
 // Paměť procesu i to, co leží na disku. Klíčem je vždycky (mtime, velikost)
 // souboru — dnešní den se tím počítá pokaždé znovu (tablety do něj pořád
@@ -343,6 +389,24 @@ export interface RadekZebricku {
   prumernaDobaS: number | null;
 }
 
+// Jeden řádek porovnání sekcí (zón expozice). Sekce se bere z meta.json,
+// události ji neznají — páruje se přes číslo displeje.
+export interface RadekSekce {
+  sekce: string;
+  displeju: number; // kolik displejů sekce má (i těch bez dat)
+  relaci: number;
+  zobrazeni: number;
+  prumernaDobaS: number | null;
+  prumerSlidu: number | null; // kolik slidů projde návštěvník za relaci
+}
+
+// Kdy lidi chodí: mřížka den v týdnu (0 = pondělí) × hodina (0–23).
+// Čísla jsou počty začátých relací.
+export interface KdyChodi {
+  mrizka: number[][]; // [7][24]
+  max: number; // nejvyšší hodnota v mřížce, ať se nemusí hledat v prohlížeči
+}
+
 export interface RadekTypu {
   typ: string;
   znamy: boolean;
@@ -359,6 +423,11 @@ export interface AnalytikaNavstevnosti {
   porovnani: { od: string; do: string; celkem: SouhrnObdobi } | null;
   displeje: RadekZebricku[];
   typySlidu: RadekTypu[];
+  sekce: RadekSekce[];
+  kdyChodi: KdyChodi;
+  // Histogram „kolik slidů za relaci" v pořadí KOSE_SLIDU + vážený průměr.
+  slidyNaRelaci: { kose: { kos: string; relaci: number }[]; prumer: number | null };
+  prvniDenSDaty: string | null;
   kvalita: {
     poskozeneRadky: number;
     zahozenaTrvani: number;
@@ -419,6 +488,7 @@ export async function analytika(opts: {
   granularita?: Granularita;
   porovnat?: boolean;
   druhy?: Map<number, string>; // číslo displeje → druh z meta.json
+  sekce?: Map<number, string>; // číslo displeje → sekce (zóna) z meta.json
   posledniDisplej?: number;
   displejuCelkem?: number;
 }): Promise<AnalytikaNavstevnosti> {
@@ -501,6 +571,74 @@ export async function analytika(opts: {
     }))
     .sort((a, b) => b.zobrazeni - a.zobrazeni);
 
+  // Kdy lidi chodí: den v týdnu × hodina. Den v týdnu se bere z data
+  // souhrnu, hodina je už v něm napočítaná. JS má neděli jako 0, my chceme
+  // pondělí první — proto to přerovnání.
+  const mrizka: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const s of souhrny) {
+    const denVTydnu = (naDatum(s.den).getDay() + 6) % 7;
+    const radek = mrizka[denVTydnu];
+    for (let h = 0; h < 24; h++) radek[h] += s.poHodinach?.[h] ?? 0;
+  }
+  const maxMrizky = mrizka.reduce((m, radek) => Math.max(m, ...radek), 0);
+
+  // Slidy na relaci: histogram v pevném pořadí košů + vážený průměr.
+  const koseMapa = new Map<string, number>();
+  for (const s of souhrny) {
+    for (const [kos, pocet] of Object.entries(s.slidyNaRelaci ?? {})) {
+      koseMapa.set(kos, (koseMapa.get(kos) ?? 0) + pocet);
+    }
+  }
+  const kose = KOSE_SLIDU.map((kos) => ({ kos, relaci: koseMapa.get(kos) ?? 0 }));
+  // Průměr ze STŘEDŮ košů, ne z celkových zobrazení dělených relacemi:
+  // druhý způsob počítá i relace bez jediného slidu a vyšel by nižší, než
+  // co histogram ukazuje. Střed otevřeného koše „11+" bereme jako 11, tedy
+  // spíš podstřelený — radši opatrné číslo než nafouknuté.
+  const STRED_KOSE: Record<string, number> = { "1": 1, "2": 2, "3": 3, "4-5": 4.5, "6-10": 8, "11+": 11 };
+  const relaciSeSlidy = kose.reduce((a, k) => a + k.relaci, 0);
+  const soucetSlidu = kose.reduce((a, k) => a + k.relaci * (STRED_KOSE[k.kos] ?? 0), 0);
+  const prumerSlidu = relaciSeSlidy ? Math.round((soucetSlidu / relaciSeSlidy) * 10) / 10 : null;
+
+  // Porovnání sekcí. Displej bez sekce v meta.json se vynechá, ať nevznikne
+  // koš „Nezařazeno", který nikomu nic neřekne.
+  const poSekcich = new Map<string, { displeje: Set<number>; sady: DenniSouhrn[] }>();
+  for (const [displej, sada] of podleDispleje) {
+    const nazev = opts.sekce?.get(displej);
+    if (!nazev) continue;
+    const zaznam = poSekcich.get(nazev) ?? { displeje: new Set<number>(), sady: [] };
+    zaznam.displeje.add(displej);
+    zaznam.sady.push(...sada);
+    poSekcich.set(nazev, zaznam);
+  }
+  // Displeje sekce, které za období neposlaly NIC, ať je vidět, že sekce má
+  // deset displejů a data chodí ze dvou.
+  for (const [displej, nazev] of opts.sekce ?? []) {
+    const zaznam = poSekcich.get(nazev) ?? { displeje: new Set<number>(), sady: [] };
+    zaznam.displeje.add(displej);
+    poSekcich.set(nazev, zaznam);
+  }
+  const sekce: RadekSekce[] = [...poSekcich.entries()]
+    .map(([nazev, { displeje: sada, sady }]) => {
+      const souhrn = secti(sady);
+      let vRelacich = 0;
+      let slidu = 0;
+      for (const s of sady) {
+        for (const [kos, pocet] of Object.entries(s.slidyNaRelaci ?? {})) {
+          vRelacich += pocet;
+          slidu += pocet * (STRED_KOSE[kos] ?? 0);
+        }
+      }
+      return {
+        sekce: nazev,
+        displeju: sada.size,
+        relaci: souhrn.relaci,
+        zobrazeni: souhrn.zobrazeni,
+        prumernaDobaS: souhrn.prumernaDobaS,
+        prumerSlidu: vRelacich ? Math.round((slidu / vRelacich) * 10) / 10 : null,
+      };
+    })
+    .sort((a, b) => b.relaci - a.relaci || a.sekce.localeCompare(b.sekce, "cs"));
+
   // Porovnání: stejně dlouhý úsek bezprostředně před `od`.
   let porovnani: AnalytikaNavstevnosti["porovnani"] = null;
   if (opts.porovnat) {
@@ -518,6 +656,10 @@ export async function analytika(opts: {
     porovnani,
     displeje,
     typySlidu,
+    sekce,
+    kdyChodi: { mrizka, max: maxMrizky },
+    slidyNaRelaci: { kose, prumer: prumerSlidu },
+    prvniDenSDaty: await nejstarsiDenSDaty(),
     kvalita: {
       poskozeneRadky,
       zahozenaTrvani,

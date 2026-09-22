@@ -18,8 +18,18 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "../lib/api";
-import { TYP_SLIDU_LABEL } from "../lib/types";
-import type { AnalytikaNavstevnosti, Granularita, SouhrnObdobi } from "../lib/types";
+import { HeatMapa } from "../components/HeatMapa";
+import { DNY_V_TYDNU, TYP_SLIDU_LABEL } from "../lib/types";
+import type {
+  Analytika as AnalytikaObalka,
+  AnalyticsQuestions,
+  AnalyticsSummary,
+  AnalytikaNavstevnosti,
+  DisplaySummary,
+  Granularita,
+  KdyChodi,
+  SouhrnObdobi,
+} from "../lib/types";
 
 // Analytika návštěvnosti pavilonu. Čte se výhradně z událostí, které
 // zapisují tablety (Unity) — CMS je jen zobrazuje.
@@ -166,6 +176,165 @@ function Prouzek({
   );
 }
 
+// --- Záložky ---------------------------------------------------------------
+//
+// Analytika má dost sekcí na to, aby se pod sebou nedaly přehlédnout. Období
+// zůstává jedno pro všechny záložky: jsou to tři pohledy na tatáž data.
+
+type Zalozka = "navstevnost" | "chovani" | "ai";
+
+const ZALOZKY: { klic: Zalozka; popis: string }[] = [
+  { klic: "navstevnost", popis: "Návštěvnost" },
+  { klic: "chovani", popis: "Chování" },
+  { klic: "ai", popis: "AI" },
+];
+
+// Popisek koše „slidů na relaci". Čeština má tři tvary a rozsah („4-5")
+// se chová jako množné číslo, ne jako dvojka — proto se to nedá odvodit
+// z prvního znaku.
+function popisKose(kos: string): string {
+  if (kos === "1") return "1 slide";
+  if (kos === "2" || kos === "3") return `${kos} slidy`;
+  if (kos === "11+") return "11 a víc slidů";
+  return `${kos.replace("-", "–")} slidů`;
+}
+
+// --- Kdy lidi chodí: den v týdnu × hodina -----------------------------------
+
+// Mřížka má 7 × 24 buněk a barví se stejnou logikou jako heat mapa: škála
+// jde od NEJMENŠÍ nenulové hodnoty k největší, ne od nuly. Provoz pavilonu
+// je soustředěný do pár hodin, takže škála od nuly by ukázala pět tmavých
+// polí a zbytek prázdný.
+function KdyChodiMrizka({ data }: { data: KdyChodi }) {
+  const hodnoty = data.mrizka.flat().filter((n) => n > 0);
+  const min = hodnoty.length ? Math.min(...hodnoty) : 0;
+  const rozpeti = data.max - min;
+
+  // Prázdné krajní hodiny se schovají: pavilon má v noci zavřeno a dvanáct
+  // prázdných sloupců jen ubírá místo těm, kde se něco děje.
+  const aktivni = Array.from({ length: 24 }, (_, h) =>
+    data.mrizka.some((radek) => radek[h] > 0) ? h : -1,
+  ).filter((h) => h >= 0);
+  const odH = aktivni.length ? aktivni[0] : 8;
+  const doH = aktivni.length ? aktivni[aktivni.length - 1] : 18;
+  const hodiny = Array.from({ length: doH - odH + 1 }, (_, i) => odH + i);
+
+  if (data.max === 0) return <p className="mt-4 text-sm text-fg-dim">Zatím žádná data.</p>;
+
+  return (
+    <div className="mt-4 overflow-x-auto">
+      <table className="border-separate border-spacing-0.5">
+        <thead>
+          <tr>
+            <th />
+            {hodiny.map((h) => (
+              <th key={h} className="pb-1 text-[10px] font-normal text-fg-dim tnum">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {DNY_V_TYDNU.map((denNazev, i) => (
+            <tr key={denNazev}>
+              <td className="pr-2 text-[11px] font-semibold text-fg-muted">{denNazev}</td>
+              {hodiny.map((h) => {
+                const n = data.mrizka[i][h];
+                // Prázdná buňka je světlá plocha, ne „nejmenší hodnota":
+                // rozdíl mezi „nikdo nepřišel" a „přišel jeden" je podstatný.
+                const podil = n <= 0 ? null : rozpeti > 0 ? (n - min) / rozpeti : 1;
+                return (
+                  <td
+                    key={h}
+                    title={`${denNazev} ${h}:00 — ${n.toLocaleString("cs-CZ")} relací`}
+                    className="h-6 w-6 rounded-sm text-center align-middle"
+                    style={{
+                      background:
+                        podil === null ? "var(--barva-canvas, #F4F6F5)" : `rgba(15,118,110,${0.12 + podil * 0.88})`,
+                    }}
+                  />
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="mt-3 flex items-center gap-3 text-[11px] text-fg-dim">
+        <span className="tnum">{cislo(min)}</span>
+        <div
+          className="h-1.5 w-32 rounded-full"
+          style={{ background: "linear-gradient(90deg, rgba(15,118,110,0.12), rgb(15,118,110))" }}
+        />
+        <span className="tnum">{cislo(data.max)}</span>
+        <span>relací za hodinu · škála od nejmenší po největší naměřenou hodnotu</span>
+      </div>
+    </div>
+  );
+}
+
+// --- AI dotazy v čase -------------------------------------------------------
+
+// Dotazy dodává Danielův backend a vrací je jako jednotlivé záznamy, ne jako
+// řadu v čase — sečíst do dnů je tedy na nás.
+//
+// POZOR NA STROP: kontrakt vrací nejvýš 2000 dotazů na jeden požadavek
+// a stránkování neumí. Za delší období jich může být víc, a pak graf NENÍ
+// celý obrázek. Když se to stane, napíše se to nad grafem místo kreslení
+// křivky, která vypadá jako pravda.
+function AiVCase({
+  dotazy,
+  od,
+  doDne,
+}: {
+  dotazy: AnalyticsQuestions;
+  od: string;
+  doDne: string;
+}) {
+  const poDnech = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const q of dotazy.questions) {
+      const den = q.timestamp.slice(0, 10);
+      if (den < od || den > doDne) continue;
+      m.set(den, (m.get(den) ?? 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [dotazy, od, doDne]);
+
+  const max = poDnech.reduce((a, [, n]) => Math.max(a, n), 0);
+  const useknuto = dotazy.total > dotazy.questions.length;
+
+  if (poDnech.length === 0) {
+    return <p className="mt-4 text-sm text-fg-dim">Za tohle období nedorazily žádné dotazy.</p>;
+  }
+
+  return (
+    <>
+      {useknuto && (
+        <p className="mt-3 rounded-lg bg-amber-soft px-3 py-2 text-xs text-amber-deep">
+          Chatbot za tohle období eviduje {cislo(dotazy.total)} dotazů, ale na jeden požadavek jich
+          pošle nejvýš {cislo(dotazy.questions.length)}. Graf je jen z nich — neberte ho jako celý
+          obrázek. Kratší období vrátí úplná čísla.
+        </p>
+      )}
+      <div className="mt-4 flex h-40 items-end gap-0.5">
+        {poDnech.map(([den, n]) => (
+          <div
+            key={den}
+            title={`${datumCesky(den)} — ${cislo(n)} dotazů`}
+            className="flex-1 rounded-t-sm bg-accent/70 transition-colors hover:bg-accent"
+            style={{ height: `${max > 0 ? Math.max(2, (n / max) * 100) : 0}%` }}
+          />
+        ))}
+      </div>
+      <div className="mt-1.5 flex justify-between text-[11px] text-fg-dim tnum">
+        <span>{datumCesky(poDnech[0][0])}</span>
+        <span>špička {cislo(max)} / den</span>
+        <span>{datumCesky(poDnech[poDnech.length - 1][0])}</span>
+      </div>
+    </>
+  );
+}
+
 export default function Analytika() {
   const [predvolba, setPredvolba] = useState<Predvolba>("mesic");
   const [od, setOd] = useState(() => odecti(dnesISO(), 29));
@@ -176,6 +345,17 @@ export default function Analytika() {
   const [data, setData] = useState<AnalytikaNavstevnosti | null>(null);
   const [nacitam, setNacitam] = useState(true);
   const [chyba, setChyba] = useState<string | null>(null);
+
+  // Záložky. Období je SPOLEČNÉ pro všechny: jsou to tři pohledy na tatáž
+  // data, ne tři nezávislé stránky.
+  const [zalozka, setZalozka] = useState<Zalozka>("navstevnost");
+
+  // Displeje (pro půdorys) a dotazy na AI. Stahují se až s otevřením záložky,
+  // která je potřebuje — bez toho by každé načtení Analytiky volalo backend
+  // chatbota, i když si nikdo mapu ani AI neotevře.
+  const [displeje, setDispleje] = useState<DisplaySummary[] | null>(null);
+  const [aiDotazy, setAiDotazy] = useState<AnalytikaObalka<AnalyticsQuestions> | null>(null);
+  const [aiSouhrn, setAiSouhrn] = useState<AnalytikaObalka<AnalyticsSummary> | null>(null);
 
   const nacti = useCallback(async () => {
     setNacitam(true);
@@ -198,6 +378,41 @@ export default function Analytika() {
   useEffect(() => {
     void nacti();
   }, [nacti]);
+
+  // Půdorys potřebuje seznam displejů. Stáhne se jednou, na období nezávisí.
+  useEffect(() => {
+    if (zalozka !== "chovani" || displeje) return;
+    api.displays().then(setDispleje, () => setDispleje([]));
+  }, [zalozka, displeje]);
+
+  // Dotazy a souhrn z backendu chatbota. Závisí na období, takže se po jeho
+  // změně natáhnou znovu; `od` se posílá jako začátek dne, ať okno sedí
+  // s tím, co ukazuje zbytek stránky.
+  useEffect(() => {
+    if (zalozka !== "ai") return;
+    let zruseno = false;
+    const since = new Date(`${od}T00:00:00`).toISOString();
+    void api
+      .analyticsQuestions({ since, limit: 2000 })
+      .then((d) => !zruseno && setAiDotazy(d))
+      .catch(() => !zruseno && setAiDotazy({ dostupne: false, duvod: "Nepodařilo se načíst." }));
+    void api
+      .analyticsSummary(since)
+      .then((d) => !zruseno && setAiSouhrn(d))
+      .catch(() => !zruseno && setAiSouhrn({ dostupne: false, duvod: "Nepodařilo se načíst." }));
+    return () => {
+      zruseno = true;
+    };
+  }, [zalozka, od]);
+
+  // Návštěvy z tabletů barví půdorys. Je to přímé měření toho, kde se lidi
+  // zastavili, takže má přednost před dotazy na AI.
+  const navstevyProMapu = useMemo(() => {
+    if (!data) return null;
+    const m = new Map<number, number>();
+    for (const d of data.displeje) m.set(d.displej, d.relaci);
+    return m.size ? m : null;
+  }, [data]);
 
   function zvolPredvolbu(p: Predvolba) {
     setPredvolba(p);
@@ -343,14 +558,39 @@ export default function Analytika() {
         </label>
       </div>
 
+      {/* Záložky. Období nad nimi platí pro všechny — jsou to tři pohledy
+          na tatáž data, ne tři nezávislé stránky. */}
+      <div className="flex flex-wrap gap-1 border-b border-line">
+        {ZALOZKY.map((z) => (
+          <button
+            key={z.klic}
+            onClick={() => setZalozka(z.klic)}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm font-semibold transition-colors ${
+              zalozka === z.klic
+                ? "border-accent text-accent"
+                : "border-transparent text-fg-muted hover:text-fg"
+            }`}
+            aria-current={zalozka === z.klic ? "page" : undefined}
+          >
+            {z.popis}
+          </button>
+        ))}
+      </div>
+
       {chyba && <p className="text-sm text-danger">{chyba}</p>}
 
-      {/* Kolik displejů vůbec posílá data, zůstává vidět: to není technikálie,
+      {/* Čísla z TABLETŮ: dlaždice i obě poznámky o kvalitě dat. Na záložce AI
+          se neukazují — tam jsou data z backendu chatbota a „Relací 8 901"
+          nad grafem dotazů by svádělo k tomu číst to jako jeden celek.
+
+          Kolik displejů vůbec posílá data, zůstává vidět: to není technikálie,
           ale to hlavní, co se o číslech níž musí vědět — jsou jen z části
           pavilonu. Naopak poškozené řádky a neznámé typy slidů kurátorovi nic
           neříkají a dělaly nahoře poplach, takže jsou sbalené stejně jako
           v přehledu. */}
-      {data && data.kvalita.displejuSData < data.kvalita.displejuCelkem && (
+      {zalozka !== "ai" &&
+        data &&
+        data.kvalita.displejuSData < data.kvalita.displejuCelkem && (
         <div className="flex items-start gap-2.5 rounded-lg bg-amber-soft px-4 py-3 text-sm text-amber-deep">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.75} />
           <div>
@@ -361,7 +601,8 @@ export default function Analytika() {
         </div>
       )}
 
-      {data &&
+      {zalozka !== "ai" &&
+        data &&
         (data.kvalita.poskozeneRadky > 0 ||
           data.kvalita.zahozenaTrvani > 0 ||
           data.kvalita.neznameTypy.length > 0) && (
@@ -397,7 +638,7 @@ export default function Analytika() {
         )}
 
       {/* Souhrnné dlaždice */}
-      {c && (
+      {zalozka !== "ai" && c && (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Dlazdice
             ikona={Users}
@@ -429,6 +670,9 @@ export default function Analytika() {
         </div>
       )}
 
+      {/* --- Záložka: Návštěvnost --- */}
+      {zalozka === "navstevnost" && (
+        <>
       {/* Hlavní graf */}
       <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -515,8 +759,7 @@ export default function Analytika() {
         </div>
       </section>
 
-      {/* Žebříčky */}
-      <div className="grid gap-5 lg:grid-cols-2">
+          <div className="grid gap-5 lg:grid-cols-2">
         <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
           <h2 className="font-display text-lg font-bold tracking-tight text-fg">
             Nejsledovanější displeje
@@ -550,6 +793,55 @@ export default function Analytika() {
           )}
         </section>
 
+            <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
+              <h2 className="font-display text-lg font-bold tracking-tight text-fg">
+                Porovnání sekcí
+              </h2>
+              <p className="mt-0.5 text-xs text-fg-muted">
+                Zóny expozice podle počtu relací. Vpravo průměrná doba u displeje.
+              </p>
+              {data && data.sekce.length > 0 ? (
+                <ul className="mt-3 divide-y divide-lineSoft">
+                  {data.sekce.map((sek) => (
+                    <Prouzek
+                      key={sek.sekce}
+                      popis={sek.sekce}
+                      poznamka={`${sek.displeju}× displej`}
+                      hodnota={cislo(sek.relaci)}
+                      vpravo={doba(sek.prumernaDobaS)}
+                      zMaxima={sek.relaci / Math.max(1, ...data.sekce.map((x) => x.relaci))}
+                    />
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-4 text-sm text-fg-dim">
+                  Zatím žádná data. Sekce se bere z info panelu displeje; displej bez sekce se
+                  do porovnání nepočítá.
+                </p>
+              )}
+            </section>
+          </div>
+        </>
+      )}
+
+      {/* --- Záložka: Chování --- */}
+      {zalozka === "chovani" && (
+        <>
+          <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
+            <h2 className="font-display text-lg font-bold tracking-tight text-fg">
+              Kdy lidi chodí
+            </h2>
+            <p className="mt-0.5 text-xs text-fg-muted">
+              Začátky relací podle dne v týdnu a hodiny. Prázdné noční hodiny se neukazují.
+            </p>
+            {data ? (
+              <KdyChodiMrizka data={data.kdyChodi} />
+            ) : (
+              <p className="mt-4 text-sm text-fg-dim">Načítám…</p>
+            )}
+          </section>
+
+          <div className="grid gap-5 lg:grid-cols-2">
         <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
           <h2 className="font-display text-lg font-bold tracking-tight text-fg">Typy slidů</h2>
           <p className="mt-0.5 text-xs text-fg-muted">
@@ -578,7 +870,111 @@ export default function Analytika() {
             </p>
           )}
         </section>
-      </div>
+
+            <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
+              <h2 className="font-display text-lg font-bold tracking-tight text-fg">
+                Kolik slidů projde návštěvník
+              </h2>
+              <p className="mt-0.5 text-xs text-fg-muted">
+                Relace podle počtu zhlédnutých slidů. Relace bez jediného slidu se nepočítá — to je
+                někdo, kdo kolem jen prošel.
+              </p>
+              {data && data.slidyNaRelaci.prumer !== null ? (
+                <>
+                  <div className="mt-3 font-display text-2xl font-bold text-fg tnum">
+                    {data.slidyNaRelaci.prumer.toLocaleString("cs-CZ")}
+                    <span className="ml-1.5 text-xs font-normal text-fg-muted">
+                      slidů na relaci v průměru
+                    </span>
+                  </div>
+                  <ul className="mt-3 divide-y divide-lineSoft">
+                    {data.slidyNaRelaci.kose.map((k) => (
+                      <Prouzek
+                        key={k.kos}
+                        popis={popisKose(k.kos)}
+                        hodnota={cislo(k.relaci)}
+                        zMaxima={
+                          k.relaci / Math.max(1, ...data.slidyNaRelaci.kose.map((x) => x.relaci))
+                        }
+                      />
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="mt-4 text-sm text-fg-dim">Zatím žádná data.</p>
+              )}
+            </section>
+          </div>
+
+          <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
+            {displeje === null ? (
+              <p className="text-sm text-fg-dim">Načítám půdorys…</p>
+            ) : displeje.length === 0 ? (
+              <p className="text-sm text-fg-dim">Seznam displejů se nepodařilo načíst.</p>
+            ) : (
+              <HeatMapa
+                displays={displeje}
+                summary={null}
+                navstevy={navstevyProMapu}
+                popisObdobi={`${datumCesky(od)} – ${datumCesky(doDne)}`}
+              />
+            )}
+          </section>
+        </>
+      )}
+
+      {/* --- Záložka: AI --- */}
+      {zalozka === "ai" && (
+        <>
+          <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
+            <h2 className="font-display text-lg font-bold tracking-tight text-fg">
+              Dotazy na AI v čase
+            </h2>
+            <p className="mt-0.5 text-xs text-fg-muted">
+              Kolik dotazů návštěvníci položili chatbotovi. Data dodává backend chatbota, ne
+              tablety.
+            </p>
+            {!aiDotazy ? (
+              <p className="mt-4 text-sm text-fg-dim">Načítám…</p>
+            ) : !aiDotazy.dostupne ? (
+              <p className="mt-4 text-sm text-fg-dim">
+                Analytika chatbota není připojená. {aiDotazy.duvod}
+              </p>
+            ) : (
+              <AiVCase dotazy={aiDotazy.data} od={od} doDne={doDne} />
+            )}
+          </section>
+
+          <section className="rounded-2xl bg-surface p-5 shadow-card ring-1 ring-line">
+            <h2 className="font-display text-lg font-bold tracking-tight text-fg">
+              Na co se lidi ptají
+            </h2>
+            <p className="mt-0.5 text-xs text-fg-muted">
+              Druhy podle počtu dotazů za zvolené období.
+            </p>
+            {!aiSouhrn ? (
+              <p className="mt-4 text-sm text-fg-dim">Načítám…</p>
+            ) : !aiSouhrn.dostupne ? (
+              <p className="mt-4 text-sm text-fg-dim">Analytika chatbota není připojená.</p>
+            ) : aiSouhrn.data.per_species.length === 0 ? (
+              <p className="mt-4 text-sm text-fg-dim">Za tohle období nedorazily žádné dotazy.</p>
+            ) : (
+              <ul className="mt-3 divide-y divide-lineSoft">
+                {aiSouhrn.data.per_species.slice(0, 12).map((sp) => (
+                  <Prouzek
+                    key={sp.species_latin || sp.species_name}
+                    popis={sp.species_name || sp.species_latin || "?"}
+                    hodnota={cislo(sp.count)}
+                    zMaxima={
+                      sp.count / Math.max(1, ...aiSouhrn.data.per_species.map((x) => x.count))
+                    }
+                  />
+                ))}
+              </ul>
+            )}
+          </section>
+        </>
+      )}
     </div>
   );
 }

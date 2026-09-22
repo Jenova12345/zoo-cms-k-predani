@@ -44,6 +44,7 @@ import { KB_TEMPLATE } from "./kbTemplate.js";
 import { LIMIT_MAX, ziskejQuestions, ziskejSummary } from "./analytics.js";
 import { prehled as prehledUdalosti } from "./udalosti.js";
 import { analytika, dnes, pocetDnu } from "./analytika.js";
+import { oznacVyreseny, platnyKlic, vyreseneDotazy, zrusVyreseny } from "./kbDotazy.js";
 import {
   popisZmen,
   sestavPayload,
@@ -1176,6 +1177,65 @@ app.get<{ Querystring: { since?: string } }>("/api/analytics/summary", async (re
   return ziskejSummary(since || undefined);
 });
 
+// --- Vyřešené dotazy na AI ---
+//
+// Seznam dotazů dodává Danielův backend a je jen ke čtení, takže poznámka
+// „tohle je doplněné do KB" leží u nás (viz kbDotazy.ts). Klíč si počítáme
+// z dotazu sami, protože žádné `id` nemá.
+
+app.get("/api/kb-dotazy/vyresene", async () => {
+  return { polozky: await vyreseneDotazy() };
+});
+
+app.post<{
+  Body: { klic?: string; otazka?: string; druh?: string };
+}>("/api/kb-dotazy/vyreseno", async (req, reply) => {
+  const { klic, otazka, druh } = req.body ?? {};
+  if (typeof klic !== "string" || !platnyKlic(klic)) {
+    return reply.code(400).send({ chyba: "Neplatný klíč dotazu." });
+  }
+  // Text a druh si ukládáme s sebou, viz komentář u VyresenyDotaz. Nejsou
+  // povinné: kdyby je prohlížeč neposlal, je lepší mít označení bez popisu
+  // než požadavek odmítnout.
+  const zaznam = {
+    cas: new Date().toISOString(),
+    uzivatel: currentUser(req),
+    ...(req.jmenoCloveka ? { jmeno: req.jmenoCloveka } : {}),
+    otazka: typeof otazka === "string" ? otazka.slice(0, 500) : "",
+    druh: typeof druh === "string" ? druh.slice(0, 200) : "",
+  };
+
+  const { pridano } = await oznacVyreseny(klic, zaznam);
+  if (pridano) {
+    await zapisAudit(req, "dotaz na AI vyřešen", popisDotazu(zaznam.druh, zaznam.otazka));
+  }
+  return { ok: true, polozky: await vyreseneDotazy() };
+});
+
+app.delete<{ Params: { klic: string } }>("/api/kb-dotazy/vyresene/:klic", async (req, reply) => {
+  const { klic } = req.params;
+  if (!platnyKlic(klic)) return reply.code(400).send({ chyba: "Neplatný klíč dotazu." });
+
+  const puvodni = (await vyreseneDotazy())[klic];
+  const { smazano } = await zrusVyreseny(klic);
+  if (smazano) {
+    await zapisAudit(
+      req,
+      "vyřešení dotazu na AI zrušeno",
+      popisDotazu(puvodni?.druh ?? "", puvodni?.otazka ?? ""),
+    );
+  }
+  return { ok: true, polozky: await vyreseneDotazy() };
+});
+
+// Popis do auditu: druh a zkrácený dotaz. Delší otázky se ořežou, ať jeden
+// řádek auditu nezabere půl obrazovky.
+function popisDotazu(druh: string, otazka: string): string {
+  const text = otazka.length > 80 ? `${otazka.slice(0, 80)}…` : otazka;
+  if (druh && text) return `${druh} — „${text}"`;
+  return druh || (text ? `„${text}"` : "dotaz");
+}
+
 // --- Události z tabletů (zapisuje Michalovo Unity, my jen čteme) ---
 //
 // `dny` je okno zpět (výchozí 30), `displej` volitelný filtr. Soubory se
@@ -1253,12 +1313,20 @@ app.get<{
     if (d.druh && d.druh !== NEPRIRAZENO) druhy.set(Number(d.id), d.druh);
   }
 
+  // Sekce (zóny expozice) na porovnání. Displej bez sekce se do porovnání
+  // nedostane — radši menší tabulka než koš „Nezařazeno".
+  const sekce = new Map<number, string>();
+  for (const d of displeje) {
+    if (d.category) sekce.set(Number(d.id), d.category);
+  }
+
   return analytika({
     od,
     do: doDne,
     granularita: g === undefined || g === "" ? undefined : g,
     porovnat: q.porovnat === "1" || q.porovnat === "true",
     druhy,
+    sekce,
     posledniDisplej: POSLEDNI_DISPLEJ,
     displejuCelkem: displeje.length,
   });

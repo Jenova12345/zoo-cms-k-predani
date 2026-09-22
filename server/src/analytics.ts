@@ -14,6 +14,8 @@
 // dashboard z ní napíše hlášku. Stejný přístup jako u reingestu, cizí služba
 // nikdy neshodí naši.
 
+import { klicDotazu } from "./kbDotazy.js";
+
 const ANALYTICS_URL = (process.env.ANALYTICS_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
 
 const TIMEOUT_MS = (() => {
@@ -28,6 +30,9 @@ export const LIMIT_MAX = 2000;
 // --- Tvar dat podle kontraktu ---
 
 export interface AnalyticsQuestion {
+  // Náš klíč, ne z kontraktu: dotaz od Daniela žádné `id` nemá. Počítá ho
+  // server při každém čtení, viz kbDotazy.ts.
+  klic: string;
   timestamp: string;
   session_id: string;
   display_id: number | null; // POZOR: může být null, párujeme primárně přes species_latin
@@ -92,7 +97,7 @@ function normalizujQuestions(raw: unknown): AnalyticsQuestions {
   const r = (raw ?? {}) as Record<string, unknown>;
   const questions = pole(r.questions).map((item) => {
     const q = (item ?? {}) as Record<string, unknown>;
-    return {
+    const dotaz = {
       timestamp: text(q.timestamp),
       session_id: text(q.session_id),
       display_id: displayId(q.display_id),
@@ -103,6 +108,12 @@ function normalizujQuestions(raw: unknown): AnalyticsQuestions {
       language: text(q.language),
       mode: text(q.mode),
     };
+    // Klíč pro označení „vyřešeno" počítáme TADY, ne v prohlížeči. Je to
+    // SHA-256 a `crypto.subtle` je v prohlížeči jen v bezpečném kontextu —
+    // CMS jede po HTTP na privátní adrese (10.10.10.10:3000), kde by
+    // nebylo dostupné vůbec. Navíc by se hash musel počítat dvakrát a obě
+    // místa by se mohla rozejít.
+    return { ...dotaz, klic: klicDotazu(dotaz) };
   });
   return {
     questions,

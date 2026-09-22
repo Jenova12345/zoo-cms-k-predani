@@ -13,6 +13,11 @@ export const DATA_ROOT = process.env.DATA_ROOT
 export const DISPLAYS_DIR = path.join(DATA_ROOT, "displeje");
 export const AUDIT_FILE = path.join(DATA_ROOT, "audit.jsonl");
 
+// Dotazy na AI, které kurátor vyřešil doplněním do znalostní báze. Seznam
+// dotazů drží Danielův backend a je jen ke čtení, tohle je naše poznámka
+// k nim (viz kbDotazy.ts).
+export const KB_VYRESENO_FILE = path.join(DATA_ROOT, "kb-vyreseno.json");
+
 // Události z tabletů (zapisuje Michalovo Unity): jeden soubor na den,
 // jeden JSON na řádek, append only. Nově v podsložce podle čísla displeje
 // (unity/2/2026-09-16.jsonl), starší soubory leží plocho přímo tady.

@@ -19,6 +19,7 @@ import type {
   VideomappingPovel,
   StavOrezuSekvence,
   Vyrez,
+  VyresenyDotaz,
 } from "./types";
 
 // Jméno přihlášeného v localStorage (jen kvůli okamžitému vykreslení; zdrojem
@@ -444,6 +445,39 @@ export const api = {
     if (filtr.answered !== undefined) params.set("answered", String(filtr.answered));
     const qs = params.toString();
     return analytika<AnalyticsQuestions>(`/api/analytics/questions${qs ? `?${qs}` : ""}`);
+  },
+
+  // --- Vyřešené dotazy na AI ---
+  // Klíč počítá server z dotazu, prohlížeč ho jen posílá zpátky. Všechna tři
+  // volání vracejí CELOU mapu vyřešených, takže se stav nemusí skládat
+  // z odpovědi a lokálního stavu a nemůže se rozejít.
+
+  async vyreseneDotazy(): Promise<Record<string, VyresenyDotaz>> {
+    const r = await request<{ polozky: Record<string, VyresenyDotaz> }>("/api/kb-dotazy/vyresene");
+    return r.polozky;
+  },
+
+  async oznacDotazVyreseny(
+    klic: string,
+    popis: { otazka: string; druh: string },
+  ): Promise<Record<string, VyresenyDotaz>> {
+    const r = await request<{ polozky: Record<string, VyresenyDotaz> }>(
+      "/api/kb-dotazy/vyreseno",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ klic, ...popis }),
+      },
+    );
+    return r.polozky;
+  },
+
+  async zrusDotazVyreseny(klic: string): Promise<Record<string, VyresenyDotaz>> {
+    const r = await request<{ polozky: Record<string, VyresenyDotaz> }>(
+      `/api/kb-dotazy/vyresene/${encodeURIComponent(klic)}`,
+      { method: "DELETE" },
+    );
+    return r.polozky;
   },
 };
 
