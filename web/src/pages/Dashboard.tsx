@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { api, formatDate, formatDateTime } from "../lib/api";
 import { useToast } from "../components/Toast";
+import { HeatMapa } from "../components/HeatMapa";
 import {
   NEPRIRAZENO,
   SLIDE_TYP_LABEL,
@@ -77,11 +78,11 @@ const NA_STRANU = 8; // kolik dotazů na jednu stranu seznamu
 // kurátor by hledal, proč se jedna sekce nezměnila.
 //
 // Data z tabletů nesou všechna tři období naráz (viz server/src/udalosti.ts),
-// takže přepnutí u návštěv je okamžité, bez dotazu na server.
+// takže přepnutí u návštěv i heat mapy je okamžité, bez dotazu na server.
 // Analytika chatbota se dotazuje s `since`, proto se odpovědi drží v cache
 // podle období.
 
-type SekceObdobi = "navstevy" | "aiKpi" | "dotazy";
+type SekceObdobi = "navstevy" | "heatmapa" | "aiKpi" | "dotazy";
 
 const OBDOBI_PORADI: Obdobi[] = ["den", "tyden", "mesic"];
 
@@ -297,6 +298,7 @@ export default function Dashboard() {
 
   const obdobiKpi = obdobiSekce("aiKpi");
   const obdobiDotazy = obdobiSekce("dotazy");
+  const obdobiHeat = obdobiSekce("heatmapa");
   const obdobiNavstevy = obdobiSekce("navstevy");
 
   // Displeje a události z tabletů. Události stačí stáhnout jednou pro celé
@@ -340,14 +342,16 @@ export default function Dashboard() {
         .finally(() => bezi.current.delete(klic));
     };
 
-    // Souhrn potřebují KPI karty. (Heat mapa se přestěhovala do Analytiky:
-    // přehled má ukazovat aktuální stav, mapa je pohled na delší období.)
-    zajisti<AnalyticsSummary>(
-      `summary:${obdobiKpi}`,
-      summaryCache[obdobiKpi] !== undefined,
-      () => api.analyticsSummary(zacatekObdobi(obdobiKpi)),
-      (d) => setSummaryCache((p) => ({ ...p, [obdobiKpi]: d })),
-    );
+    // Souhrn potřebují KPI karty i heat mapa (ta jím barví, když z tabletů
+    // nechodí návštěvy).
+    for (const o of new Set([obdobiKpi, obdobiHeat])) {
+      zajisti<AnalyticsSummary>(
+        `summary:${o}`,
+        summaryCache[o] !== undefined,
+        () => api.analyticsSummary(zacatekObdobi(o)),
+        (d) => setSummaryCache((p) => ({ ...p, [o]: d })),
+      );
+    }
     zajisti<AnalyticsQuestions>(
       `posledni:${obdobiDotazy}`,
       posledniCache[obdobiDotazy] !== undefined,
@@ -365,9 +369,10 @@ export default function Dashboard() {
         }),
       (d) => setNezvladnuteCache((p) => ({ ...p, [obdobiDotazy]: d })),
     );
-  }, [obdobiKpi, obdobiDotazy, summaryCache, posledniCache, nezvladnuteCache]);
+  }, [obdobiKpi, obdobiHeat, obdobiDotazy, summaryCache, posledniCache, nezvladnuteCache]);
 
   const summary = summaryCache[obdobiKpi] ?? null;
+  const summaryHeat = summaryCache[obdobiHeat] ?? null;
   const posledni = posledniCache[obdobiDotazy] ?? null;
   const nezvladnute = nezvladnuteCache[obdobiDotazy] ?? null;
 
@@ -385,6 +390,14 @@ export default function Dashboard() {
   }, []);
 
   const udalostiData = udalosti?.dostupne ? udalosti.data : null;
+
+  // Návštěvy z tabletů barví mapu, když nějaké jsou: je to přímé měření toho,
+  // kde se lidi zastavili. Dotazy na AI jsou záloha. Bere se období zvolené
+  // u mapy, ne u zbytku přehledu.
+  const navstevyProMapu = useMemo(() => {
+    if (!udalostiData?.maData) return null;
+    return new Map(udalostiData.displeje.map((d) => [d.displej, d.navstevy[obdobiHeat]]));
+  }, [udalostiData, obdobiHeat]);
 
   // Kolik tabletů je v jakém stavu. Počítá se ze stejného seznamu, jaký
   // kreslí proužek, takže se čísla a barvy nemůžou rozejít.
@@ -901,6 +914,40 @@ export default function Dashboard() {
           detail={`Chatbot je připojený, za ${OBDOBI_VETA[obdobiKpi]} ale nezaznamenal žádný dotaz.`}
         />
       )}
+
+      {/* Mapa pavilonu. Vlastní přepínač období jako ostatní sekce; kreslení
+          je ve sdílené komponentě, tutéž mapu ukazuje i Analytika. */}
+      <section className="space-y-4">
+        {chybaDispleju && (
+          <Hlaska text="Seznam displejů se nepodařilo načíst." detail={chybaDispleju} />
+        )}
+        {displays && displays.length === 0 && (
+          <Hlaska
+            text="V CMS zatím nejsou žádné displeje."
+            detail="Datová složka je prázdná, displeje vytvoří `npm run seed`."
+          />
+        )}
+        {!displays && !chybaDispleju && <Cekam />}
+        {displays && displays.length > 0 && (
+          <HeatMapa
+            displays={displays}
+            summary={summaryHeat?.dostupne ? summaryHeat.data : null}
+            navstevy={navstevyProMapu}
+            popisObdobi={OBDOBI_VETA[obdobiHeat]}
+            akce={
+              <PrepinacObdobi
+                hodnota={obdobiHeat}
+                onZmena={(o) => nastavSekci("heatmapa", o)}
+                maly
+                vlastni={vlastniObdobi.heatmapa !== undefined}
+                onReset={() => nastavSekci("heatmapa", globalniObdobi)}
+              />
+            }
+          />
+        )}
+      </section>
+
+      <Divider />
 
       {/* Dvousloupcový editorial spread: poslední dotazy | co AI nezvládla.
           Oba sloupce mají pevnou výšku a listuje se v nich, jinak se přehled

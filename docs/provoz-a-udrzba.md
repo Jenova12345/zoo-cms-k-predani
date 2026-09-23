@@ -1077,7 +1077,11 @@ nedá započítat dvakrát.
 - Výchozí okno je **posledních 30 dnů**, ať stránka po otevření něco ukáže.
 - Rozsah smí mít nejvýš **400 dnů** (rok s rezervou), jinak `400`.
 - `porovnat=1` dopočítá stejně dlouhé předchozí období, z něj jsou zelená
-  a červená procenta u čísel.
+  a červená procenta u čísel. **Když má předchozí období míň než 30 naměřených
+  jednotek, procento se nezobrazí** a místo něj stojí „minule nic" / „minule
+  skoro nic". Z 2 relací na 1 400 totiž vyjde „+70 710 %", což vypadá jako
+  zázračný růst, a přitom to znamená jen „tehdy se ještě neměřilo". Hranice je
+  `MIN_PRO_POROVNANI` ve `web/src/pages/Analytika.tsx`.
 - Do žebříčku se berou názvy druhů z `meta.json`. Displej bez druhu se ukáže
   jako „Displej 19", ne jako deset řádků „Nepřiřazeno".
 
@@ -1204,21 +1208,34 @@ z pole `since` v odpovědi a při nesouladu větším než hodina se rovnou nap�
 
 ### Heat mapa nad půdorysem pavilonu
 
-> **Mapa je v Analytice, ne v dashboardu** (záložka „Chování"). Dashboard má
-> ukazovat AKTUÁLNÍ STAV — tablety, dnešní čísla, poslední dotazy, co AI
-> nezvládla. Mapa je pohled na delší období, takže patří k analytice.
-> Kreslení je ve společné komponentě `web/src/components/HeatMapa.tsx`.
+> **Mapa je na OBOU místech**: v dashboardu (s přepínačem období jako ostatní
+> sekce) i v Analytice na záložce „Chování". Kreslení je jen jednou, ve
+> společné komponentě `web/src/components/HeatMapa.tsx`; stránka jí předá
+> data a volitelné ovládání do hlavičky (`akce`). Vlastní nadpis si stránky
+> nepřidávají — komponenta ho má svůj a byl by dvakrát.
 
-**Barva se škáluje od nejmenší po největší naměřenou hodnotu, ne od nuly.**
-Displeje mívají podobná čísla (třeba 400 až 1300 návštěv) a škála od nuly by
-je obarvila skoro stejně. Proto:
+**Barva ukazuje POŘADÍ mezi displeji (kvantil), ne absolutní hodnotu.**
+
+Zkoušely se postupně tři škály a první dvě nefungovaly:
+
+| Škála | Proč selhala |
+|---|---|
+| od nuly (`count / max`) | při 400 až 1 300 návštěvách vyšlo všem 0,3 až 1,0 a mapa byla jednolitě tmavá |
+| min–max (`(count−min)/(max−min)`) | stačil JEDEN extrém (1 301 proti 400–700) a zbytek se stlačil k sobě — mapa zezelenala |
+| **pořadí (kvantil)** | extrém je vždycky na konci škály a jak je daleko, nikoho neruší |
+
+Detaily, na kterých záleží:
 
 - počítá se jen z displejů, které data **mají**; nula znamená „tablet nic
   neposlal", ne „nejméně navštívený", a takový bod zůstává šedý,
-- když mají všechny stejné číslo, dostanou prostřední odstín — tvrdit
-  o jednom z nich „tenhle je nejmíň" by byla lež,
-- **legenda musí nést krajní čísla.** U relativní škály znamená nejtmavší bod
-  „nejvíc z toho, co tu je", ne „hodně"; bez čísel by to bylo zavádějící.
+- **shodné hodnoty musí dostat shodnou barvu**, proto se pro každou hodnotu
+  bere PRŮMĚRNÉ pořadí všech, kdo ji mají,
+- jediný displej s daty nebo všechny stejné → prostřední odstín; tvrdit
+  „tenhle je nejmíň" o displeji, který nemá s čím být porovnaný, by byla lež,
+- **legenda musí říct, že jde o pořadí.** Jinak si ji každý přečte jako
+  stupnici čísel a bude z ní vyvozovat, že oranžový displej má „skoro tolik
+  co červený". Skutečné krajní hodnoty se vypisují vedle, přesné číslo
+  displeje ukáže nájezd myší.
 
 Mapa kreslí body na **oficiální půdorys pavilonu od ZOO**:
 `web/public/pavilon-pudorys.png` (kopie `podklady/Amphibiarium_mapa 1.png`,

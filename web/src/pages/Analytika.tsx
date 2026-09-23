@@ -88,17 +88,34 @@ function datumCesky(iso: string): string {
   return `${Number(d)}. ${Number(m)}. ${r}`;
 }
 
+// Kolik musí mít minulé období naměřeno, aby z něj šlo počítat procento.
+// Pod touhle hranicí je poměr jen šum: z 2 relací na 1 400 vyjde „+70 710 %",
+// což vypadá jako zázračný růst, a přitom to znamená jen „tehdy se ještě
+// neměřilo". Zaokrouhlené na desítky, přesná hodnota není podstatná —
+// důležité je nepouštět ven čísla, která nikdo neumí přečíst.
+const MIN_PRO_POROVNANI = 30;
+
 // Změna proti minulému období. Null znamená „nebylo s čím porovnat" —
 // dělit nulou a napsat +∞ % by bylo horší než nenapsat nic.
 function zmena(ted: number, drive: number): number | null {
-  if (drive === 0) return null;
+  if (drive < MIN_PRO_POROVNANI) return null;
   return Math.round(((ted - drive) / drive) * 100);
 }
 
 function Zmena({ ted, drive }: { ted: number; drive: number | undefined }) {
   if (drive === undefined) return null;
   const z = zmena(ted, drive);
-  if (z === null) return <span className="text-xs text-fg-dim">minule nic</span>;
+  if (z === null) {
+    // Říká se PROČ tam procento není, ať to nevypadá jako chyba načtení.
+    return (
+      <span
+        className="text-xs text-fg-dim"
+        title={`Předchozí období má jen ${drive.toLocaleString("cs-CZ")} — na procento je to málo, vyšlo by nesmyslné číslo.`}
+      >
+        {drive === 0 ? "minule nic" : "minule skoro nic"}
+      </span>
+    );
+  }
   const barva = z > 0 ? "text-accent" : z < 0 ? "text-danger" : "text-fg-dim";
   return (
     <span className={`text-xs font-semibold tnum ${barva}`}>
@@ -221,14 +238,23 @@ function KdyChodiMrizka({ data }: { data: KdyChodi }) {
 
   if (data.max === 0) return <p className="mt-4 text-sm text-fg-dim">Zatím žádná data.</p>;
 
+  // Mřížka se roztahuje přes celou kartu: buňky jsou zlomky šířky, ne pevné
+  // pixely. Čísla v buňkách se ukazují jen když je dost místa (od ~34 px),
+  // jinak by se lámala přes sebe — na úzkém okně zůstane jen barva a tooltip.
+  const sirkaBunky = `${100 / (hodiny.length + 1)}%`;
+
   return (
-    <div className="mt-4 overflow-x-auto">
-      <table className="border-separate border-spacing-0.5">
+    <div className="mt-4">
+      <table className="w-full table-fixed border-separate border-spacing-1">
         <thead>
           <tr>
-            <th />
+            <th style={{ width: sirkaBunky }} />
             {hodiny.map((h) => (
-              <th key={h} className="pb-1 text-[10px] font-normal text-fg-dim tnum">
+              <th
+                key={h}
+                className="pb-1 text-xs font-semibold text-fg-muted tnum"
+                style={{ width: sirkaBunky }}
+              >
                 {h}
               </th>
             ))}
@@ -237,7 +263,7 @@ function KdyChodiMrizka({ data }: { data: KdyChodi }) {
         <tbody>
           {DNY_V_TYDNU.map((denNazev, i) => (
             <tr key={denNazev}>
-              <td className="pr-2 text-[11px] font-semibold text-fg-muted">{denNazev}</td>
+              <td className="pr-2 text-right text-sm font-semibold text-fg-muted">{denNazev}</td>
               {hodiny.map((h) => {
                 const n = data.mrizka[i][h];
                 // Prázdná buňka je světlá plocha, ne „nejmenší hodnota":
@@ -247,22 +273,28 @@ function KdyChodiMrizka({ data }: { data: KdyChodi }) {
                   <td
                     key={h}
                     title={`${denNazev} ${h}:00 — ${n.toLocaleString("cs-CZ")} relací`}
-                    className="h-6 w-6 rounded-sm text-center align-middle"
+                    className="h-11 rounded-md text-center align-middle text-[11px] font-semibold tnum"
                     style={{
                       background:
-                        podil === null ? "var(--barva-canvas, #F4F6F5)" : `rgba(15,118,110,${0.12 + podil * 0.88})`,
+                        podil === null
+                          ? "var(--barva-canvas, #F4F6F5)"
+                          : `rgba(15,118,110,${0.12 + podil * 0.88})`,
+                      // Na tmavém poli je tmavý text nečitelný.
+                      color: podil !== null && podil > 0.55 ? "#FFFFFF" : "var(--barva-fg-dim, #6B7B76)",
                     }}
-                  />
+                  >
+                    {n > 0 ? cislo(n) : ""}
+                  </td>
                 );
               })}
             </tr>
           ))}
         </tbody>
       </table>
-      <div className="mt-3 flex items-center gap-3 text-[11px] text-fg-dim">
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-dim">
         <span className="tnum">{cislo(min)}</span>
         <div
-          className="h-1.5 w-32 rounded-full"
+          className="h-2 w-32 rounded-full"
           style={{ background: "linear-gradient(90deg, rgba(15,118,110,0.12), rgb(15,118,110))" }}
         />
         <span className="tnum">{cislo(data.max)}</span>

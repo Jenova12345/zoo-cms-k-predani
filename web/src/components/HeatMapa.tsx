@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 
 import { canonicalizeLatin } from "../lib/latin";
 import { NEPRIRAZENO } from "../lib/types";
@@ -189,21 +190,43 @@ function naparuj(
     ];
   });
 
-  // Škála jde od NEJMENŠÍ k NEJVĚTŠÍ naměřené hodnotě, ne od nuly. Když mají
-  // tablety podobná čísla (200 až 250 návštěv), škála od nuly je všechny
-  // obarví skoro stejně a mapa nic neřekne. Počítá se jen z displejů, které
-  // data MAJÍ — nula znamená „tablet nic neposlal", ne „nejméně navštívený",
-  // a ty zůstávají neutrálně šedé.
+  // Barva ukazuje POŘADÍ mezi displeji (kvantil), ne absolutní hodnotu.
+  //
+  // Proč ne min–max: stačí jeden extrém a zbytek se stlačí k sobě. Reálně
+  // měl jeden displej 1 301 návštěv a ostatní 400 až 700 — po přepočtu na
+  // rozpětí jim všem vyšlo skoro totéž a mapa zezelenala. Pořadí tenhle
+  // problém nemá: nejnavštěvovanější je vždycky na jednom konci škály,
+  // nejméně navštěvovaný na druhém, a jak daleko je extrém, nikoho neruší.
+  //
+  // Počítá se jen z displejů, které data MAJÍ — nula znamená „tablet nic
+  // neposlal", ne „nejméně navštívený", a ty zůstávají neutrálně šedé.
   const sData = bezScore.filter((n) => n.count > 0);
   const max = sData.reduce((a, b) => Math.max(a, b.count), 0);
   const min = sData.length ? sData.reduce((a, b) => Math.min(a, b.count), Infinity) : 0;
-  const rozpeti = max - min;
-  const nodes: HeatNode[] = bezScore.map((n) => ({
-    ...n,
-    // Všechny stejné (rozpětí 0) → prostřední odstín: tvrdit „tenhle je
-    // nejmíň" o displeji se stejným číslem jako ostatní by byla lež.
-    score: n.count <= 0 ? 0 : rozpeti > 0 ? Math.max(0.04, (n.count - min) / rozpeti) : 0.5,
-  }));
+
+  // Pořadí od nejmenšího. Shodné hodnoty musí dostat shodnou barvu, jinak by
+  // dva displeje se stejným číslem vypadaly různě — proto se pro každou
+  // hodnotu bere PRŮMĚRNÉ pořadí všech, kdo ji mají.
+  const serazene = [...sData].map((n) => n.count).sort((a, b) => a - b);
+  const poradiHodnoty = new Map<number, number>();
+  for (let i = 0; i < serazene.length; i++) {
+    const h = serazene[i];
+    if (poradiHodnoty.has(h)) continue;
+    let konec = i;
+    while (konec + 1 < serazene.length && serazene[konec + 1] === h) konec++;
+    poradiHodnoty.set(h, (i + konec) / 2);
+  }
+  const posledni = serazene.length - 1;
+
+  const nodes: HeatNode[] = bezScore.map((n) => {
+    if (n.count <= 0) return { ...n, score: 0 };
+    // Jediný displej s daty nebo všechny stejné → prostřední odstín. Tvrdit
+    // „tenhle je nejmíň" o displeji, který nemá s čím být porovnaný, by byla
+    // lež.
+    if (posledni <= 0 || min === max) return { ...n, score: 0.5 };
+    const poradi = poradiHodnoty.get(n.count) ?? 0;
+    return { ...n, score: Math.max(0.04, poradi / posledni) };
+  });
 
   const nenaparovano = (summary?.per_species ?? []).filter((s) => {
     const latin = canonicalizeLatin(s.species_latin);
@@ -241,6 +264,7 @@ export function HeatMapa({
   summary,
   navstevy,
   popisObdobi,
+  akce,
 }: {
   displays: DisplaySummary[];
   // Souhrn dotazů na AI. `null` = analytika chatbota není k dispozici; mapa
@@ -250,6 +274,10 @@ export function HeatMapa({
   // přímé měření toho, kde se lidi zastavili. Dotazy na AI jsou záloha.
   navstevy: Map<number, number> | null;
   popisObdobi: string;
+  // Volitelné ovládání do hlavičky (přehled sem dává přepínač období).
+  // Je to prop, ne vlastní nadpis v každé stránce — jinak by se nad mapou
+  // objevil titulek dvakrát, jednou ze stránky a jednou odsud.
+  akce?: ReactNode;
 }) {
   const [hover, setHover] = useState<HeatNode | null>(null);
   const mapa = naparuj(displays, summary, navstevy);
@@ -265,6 +293,7 @@ export function HeatMapa({
             Barví: {navstevy ? "návštěvy z tabletů" : "dotazy na AI"} · {popisObdobi}
           </div>
         </div>
+        {akce}
         {mapa.maxNode && (
           <div className="text-right">
             <div className="font-display text-xl font-bold text-fg tnum leading-none">
@@ -356,18 +385,28 @@ export function HeatMapa({
       <div className="mx-auto w-full max-w-[760px] space-y-2.5">
         {maCim && mapa.max > 0 ? (
           <>
-            {/* Legenda MUSÍ nést čísla: škála je relativní, takže nejtmavší bod
-                znamená „nejvíc z toho, co tu je". Bez krajních hodnot by
-                vypadal jako „hodně", i když je rozdíl mezi displeji malý. */}
+            {/* Legenda musí říct, že barva je POŘADÍ, ne hodnota. Jinak si ji
+                každý přečte jako stupnici čísel a bude z ní vyvozovat, že
+                oranžový displej má „skoro tolik co červený". */}
             <div className="flex items-center gap-3 text-[11px] text-fg-dim max-w-md">
-              <span className="tnum">{cisloCs(mapa.min)}</span>
+              <span>nejméně</span>
               <div className="h-1.5 flex-1 rounded-full" style={{ background: HEAT_GRADIENT }} />
-              <span className="tnum">{cisloCs(mapa.max)}</span>
+              <span>nejvíce</span>
             </div>
             <p className="text-[11px] text-fg-dim">
-              {mapa.min === mapa.max
-                ? "Všechny displeje s daty mají stejné číslo, mapa je proto jednobarevná."
-                : "Barva se škáluje od nejmenší po největší naměřenou hodnotu, ne od nuly — proto jsou vidět i malé rozdíly. Šedý bod znamená, že tablet za období neposlal nic."}
+              {mapa.min === mapa.max ? (
+                "Všechny displeje s daty mají stejné číslo, mapa je proto jednobarevná."
+              ) : (
+                <>
+                  Barva ukazuje <strong className="font-semibold">pořadí mezi displeji</strong>, ne
+                  samotné číslo: nejtmavší je ten nejnavštěvovanější, nejsvětlejší ten nejméně
+                  navštěvovaný. Proto jeden výrazně silnější displej nestlačí barvy ostatních
+                  k sobě. Skutečné hodnoty jsou{" "}
+                  <span className="tnum">{cisloCs(mapa.min)}</span> až{" "}
+                  <span className="tnum">{cisloCs(mapa.max)}</span> (přesné číslo ukáže nájezd
+                  myší). Šedý bod znamená, že tablet za období neposlal nic.
+                </>
+              )}
             </p>
             {mapa.nenaparovano.length > 0 && (
               <p className="text-[11px] text-fg-dim">
